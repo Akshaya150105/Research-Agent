@@ -1,0 +1,113 @@
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 1: 
+Page 2: 
+Page 2: 
+Page 2: 
+Page 3: 
+Page 3: 
+Page 3: 
+Page 3: 
+Page 4: 
+Page 4: 
+Page 4: 
+Page 4: 
+Page 4: 
+Page 4: 
+Page 5: 
+Page 5: 
+Page 5: 
+Page 5: 
+Page 5: 
+Page 6: 
+Page 6: 
+Page 6: 
+Page 6: 
+Page 6: 
+Page 6: 
+Page 6: 
+Page 6: 
+Page 7: 
+Page 7: 
+Page 7: 
+Page 7: 
+Page 7: 
+Page 7: 
+Page 7: 
+Page 7: 
+Page 7: 
+Page 7: 
+Page 7: 
+Page 7: 
+Page 7: 
+Page 7: 
+Page 7: 
+Page 7: 
+Page 8: 
+Page 8: 
+Page 8: 
+Page 8: 
+Page 8: 
+Page 8: 
+Page 8: 
+Page 8: 
+Page 8: 
+Page 9: 
+Page 9: 
+Page 9: 
+Page 9: 
+Page 9: 
+Page 9: 
+Page 9: 
+Page 9: 
+Page 9: 
+Page 9: 
+Page 9: 
+Page 9: 
+Page 9: 
+Page 9: 
+Page 9: https://github.com/tensorflow/tensor2tensor
+Page 9: https://github.com/tensorflow/tensor2tensor
+Page 9: http://arxiv.org/abs/1607.06450
+Page 9: http://arxiv.org/abs/1601.06733
+Page 10: http://arxiv.org/abs/1610.02357
+Page 10: http://arxiv.org/abs/1705.03122
+Page 10: http://arxiv.org/abs/1308.0850
+Page 10: http://arxiv.org/abs/1602.02410
+Page 10: http://arxiv.org/abs/1610.10099
+Page 10: http://arxiv.org/abs/1703.10722
+Page 10: http://arxiv.org/abs/1703.03130
+Page 10: http://arxiv.org/abs/1511.06114
+Page 10: http://arxiv.org/abs/1508.04025
+Page 11: http://arxiv.org/abs/1705.04304
+Page 11: http://arxiv.org/abs/1608.05859
+Page 11: http://arxiv.org/abs/1508.07909
+Page 11: http://arxiv.org/abs/1701.06538
+Page 11: http://arxiv.org/abs/1609.08144
