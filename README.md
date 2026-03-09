@@ -8,21 +8,19 @@ The project is currently divided into two core phases: **Phase 1: PDF Parsing** 
 
 ## Part 1: PDF Parser
 
-The `pdf_parser` is a completely local, python-based parser that reads academic PDFs and outputs a strictly structured JSON file while preserving natural reading order. It intelligently extracts text, images, auto-detects synthetic figures (vector graphics), and native tables.
+The `module_parser` is a completely local, python-based parser that reads academic PDFs and outputs a strictly structured JSON file while preserving natural reading order. It intelligently extracts text, images, auto-detects synthetic figures (vector graphics), and native tables.
 
 ### Setup
-1. Navigate into the `pdf_parser` directory.
-2. Install the requirements (Requires PyMuPDF for advanced features, and pdfplumber as a table fallback):
+1. Install the requirements (Requires PyMuPDF for advanced features, and pdfplumber as a table fallback):
    ```bash
    pip install pymupdf pdfplumber PyPDF2
    ```
 
 ### Usage
-Run the parser from the `pdf_parser` directory using the modular CLI:
+Run the parser using the modular CLI:
 
 ```bash
-cd pdf_parser
-python main.py "..\Data\your_paper.pdf" -o "output_folder" -a -i
+python -m modular_parser.cli "..\Data\your_paper.pdf" -o "output_folder" -a -i
 ```
 
 **Flags:**
@@ -35,8 +33,200 @@ python main.py "..\Data\your_paper.pdf" -o "output_folder" -a -i
 The most important output is `output_folder/structured_content.json`, which contains the reading-order extracted text, table matrices, and image bounding boxes.
 
 ---
+- **Phase 2: Hybrid Entity-Claim Extraction**
 
-## Part 2: Extraction Agent
+---
+
+# Part 1: PDF Parser
+
+The `modular_parser` module is a completely local, Python-based parser that reads academic PDFs and outputs a strictly structured JSON file while preserving natural reading order. It intelligently extracts text, images, auto-detects synthetic figures (vector graphics), and native tables.
+
+## Setup
+
+Install the requirements (Requires PyMuPDF for advanced features, and pdfplumber as a table fallback):
+
+```bash
+pip install pymupdf pdfplumber PyPDF2
+````
+
+## Usage
+
+Run the parser using the modular CLI:
+
+```bash
+python -m modular_parser.cli "..\Data\your_paper.pdf" -o "output_folder" -a -i
+```
+
+### Flags
+
+* `-o "output_folder"` : Where to save the output files (JSON, extracted images, text).
+* `-a` : Auto-detect synthetic figures (diagrams) and save them as PNGs.
+* `-i` : Extract standard rasterized images from the PDF.
+* `--no-structured` : Disables the generation of the `structured_content.json` reading-order file.
+
+### Output
+
+The most important output is:
+
+```
+output_folder/structured_content.json
+```
+
+This file contains:
+
+* Reading-order extracted text
+* Table matrices
+* Image bounding boxes
+* Structural blocks of the document
+
+---
+
+# Part 2: GROBID Scientific Structure Parser
+
+The `grobid_parser` module extracts **semantic scientific structure** from research PDFs using **GROBID (GeneRation Of BIbliographic Data)**.
+
+While the Phase 1 parser focuses on **layout and reading order**, the GROBID parser focuses on **scientific document structure and metadata**.
+
+It converts PDFs into **TEI XML**, then extracts structured sections such as:
+
+* Abstract
+* Introduction
+* Related Work
+* Methods
+* Experiments
+* Results
+* Discussion
+* Conclusion
+
+along with complete **paper metadata**.
+
+---
+
+## Requirements
+
+GROBID must be running locally.
+
+The easiest way is using Docker:
+
+```bash
+docker run --rm --init -p 8070:8070 lfoppiano/grobid:0.8.0
+```
+
+Verify that the service is running:
+
+```bash
+curl http://localhost:8070/api/isalive
+```
+
+Expected response:
+
+```
+true
+```
+
+---
+
+## Usage
+
+Run the GROBID parser using the CLI:
+
+```bash
+python -m grobid_parser.cli "..\Data\your_paper.pdf" -o "output_folder"
+```
+
+Or using the project entry point:
+
+```bash
+python run_grobid.py "..\Data\your_paper.pdf" -o "output_folder"
+```
+
+---
+
+## CLI Options
+
+* `-o "output_folder"` : Directory where parsed results will be saved
+* `--grobid-url` : Custom GROBID server URL (default: `http://localhost:8070`)
+* `--tei-cache` : Use a cached TEI XML file instead of calling GROBID
+* `--no-consolidate` : Disable CrossRef metadata enrichment
+* `--check` : Verify that the GROBID service is running
+* `-v` : Print preview of extracted section text
+
+Example:
+
+```bash
+python -m grobid_parser.cli paper.pdf -o parsed_output -v
+```
+
+---
+
+## Output Files
+
+The parser produces several structured outputs:
+
+```
+output_folder/
+├── metadata.json
+├── sections.json
+├── tei_raw.xml
+└── summary.txt
+```
+
+### metadata.json
+
+Contains extracted paper metadata:
+
+```
+title
+authors
+year
+venue
+doi
+abstract
+```
+
+---
+
+### sections.json
+
+Contains structured scientific sections extracted from the paper:
+
+```json
+[
+  {
+    "section_type": "Introduction",
+    "heading": "1 Introduction",
+    "text": "..."
+  }
+]
+```
+
+Sections are automatically classified into scientific categories such as:
+
+* Abstract
+* Introduction
+* Related Work
+* Methods
+* Experiments
+* Results
+* Discussion
+* Conclusion
+
+---
+
+### tei_raw.xml
+
+Raw TEI XML returned by GROBID.
+
+This file is saved to allow **re-parsing without reprocessing the PDF**, which significantly speeds up experiments.
+
+---
+
+### summary.txt
+
+A human-readable summary of the extracted paper structure including metadata and section overview.
+
+---
+## Part 3: Extraction Agent
 
 The `extraction_agent` takes the `structured_content.json` generated by the PDF parser and runs a rigorous **Two-Stage Hybrid Extraction Pipeline** to pull semantic metadata (Methods, Datasets, Metrics, Tasks) out of the paper. 
 
@@ -66,3 +256,4 @@ python -m extraction_agent.main "pdf_parser\output_folder\structured_content.jso
 This will generate `paper_knowledge_graph.json`, which contains a highly structured list of explicitly stated claims, limitations, and performance assertions mapped directly to verified entities and their exact sentence context. 
 
 This output serves as the Knowledge Graph foundation for Phase 3 (Multi-Agent Comparison & Critique)!
+
