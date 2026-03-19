@@ -51,3 +51,6 @@ Data/
 # OS config
 .DS_Store
 Thumbs.db
+
+#test outputs
+data_1/parsed/test/

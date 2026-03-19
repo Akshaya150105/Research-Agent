@@ -1,0 +1,16 @@
+# scibert_ner requirements
+# Install with: pip install -r requirements_ner.txt
+
+# Core NLP
+transformers>=4.38.0
+torch>=2.0.0          # CPU version fine; for GPU: pip install torch --index-url https://download.pytorch.org/whl/cu118
+
+# Tokenization (required by transformers)
+tokenizers>=0.15.0
+
+# Already in your environment from Phase 1 (listed for completeness)
+# pymupdf
+# pdfplumber
+
+# Optional: speeds up tokenization
+sentencepiece>=0.1.99
