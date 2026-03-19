@@ -22,7 +22,8 @@ SCIIE_LABEL_MAP = {
 HIGH_PRIORITY_SECTIONS = {
     "Methods", "Experiments", "Results", "Evaluation",
     "Abstract", "Introduction", "Discussion", "Conclusion",
-    "Related Work", "Limitations", "Future Work"
+    "Related Work", "Limitations", "Future Work",
+    "Table", "Figure"
 }
 
 

@@ -105,7 +105,7 @@ def main():
         print("[GROBID] TEI XML received.")
 
     print("[PARSE] Parsing TEI XML...")
-    result = parse_tei(tei_xml)
+    result = parse_tei(tei_xml, pdf_path=args.pdf_file)
 
     if not result.success:
         print(f"[ERROR] Parsing failed: {result.error}")

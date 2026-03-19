@@ -35,6 +35,16 @@ def save_grobid_output(
     with open(sections_path, "w", encoding="utf-8") as f:
         json.dump(sections_data, f, indent=2, ensure_ascii=False)
 
+    # 2b. figures.json
+    figures_path = out / "figures.json"
+    with open(figures_path, "w", encoding="utf-8") as f:
+        json.dump([asdict(f) for f in result.figures], f, indent=2, ensure_ascii=False)
+
+    # 2c. tables.json
+    tables_path = out / "tables.json"
+    with open(tables_path, "w", encoding="utf-8") as f:
+        json.dump([asdict(t) for t in result.tables], f, indent=2, ensure_ascii=False)
+
     # 3. tei_raw.xml
     tei_path = out / "tei_raw.xml"
     with open(tei_path, "w", encoding="utf-8") as f:

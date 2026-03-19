@@ -48,6 +48,31 @@ def run_pipeline(
 
     with open(sections_path, encoding="utf-8") as f:
         sections = json.load(f)
+
+    tables_path = grobid_folder / "tables.json"
+    if tables_path.exists():
+        with open(tables_path, "r", encoding="utf-8") as f:
+            for t in json.load(f):
+                content = t.get("caption", "").strip()
+                rows = t.get("rows", [])
+                if rows:
+                    content += "\n" + "\n".join(" | ".join(str(c) for c in r) for r in rows)
+                sections.append({
+                    "section_type": "Table",
+                    "heading": f"Table {t.get('label', '')}",
+                    "text": content.strip()
+                })
+
+    figures_path = grobid_folder / "figures.json"
+    if figures_path.exists():
+        with open(figures_path, "r", encoding="utf-8") as f:
+            for fig in json.load(f):
+                sections.append({
+                    "section_type": "Figure",
+                    "heading": f"Figure {fig.get('label', '')}",
+                    "text": fig.get("caption", "").strip()
+                })
+
     with open(entities_path, encoding="utf-8") as f:
         existing = json.load(f)
 
