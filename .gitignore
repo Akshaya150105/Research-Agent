@@ -54,3 +54,12 @@ Thumbs.db
 
 #test outputs
 data_1/parsed/test/
+
+# RAG & output ignores
+rag/chroma_store/
+output_folder/
+memory/
+status_out.txt
+temp_status.py
+git_files.txt
+full_output.txt
