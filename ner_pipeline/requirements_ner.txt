@@ -3,7 +3,7 @@
 
 # Core NLP
 transformers>=4.38.0
-torch>=2.0.0          # CPU version fine; for GPU: pip install torch --index-url https://download.pytorch.org/whl/cu118
+torch>=2.1.2          # CPU version fine; for GPU: pip install torch --index-url https://download.pytorch.org/whl/cu118
 
 # Tokenization (required by transformers)
 tokenizers>=0.15.0
