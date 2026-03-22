@@ -54,3 +54,13 @@ Thumbs.db
 
 #test outputs
 data_1/parsed/test/
+
+# Agent outputs
+data_1/agent_outputs/
+
+# Parsed generated outputs (optional but recommended)
+data_1/parsed/*_enriched.json
+data_1/parsed/*_critique.json
+
+# Logs / temp
+*.log
