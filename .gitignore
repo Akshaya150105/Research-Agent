@@ -55,6 +55,8 @@ Thumbs.db
 #test outputs
 data_1/parsed/test/
 
+#memory
+memory/
 # RAG & output ignores
 rag/chroma_store/
 output_folder/
