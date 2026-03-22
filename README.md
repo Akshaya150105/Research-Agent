@@ -19,6 +19,3 @@ Takes the decoupled JSON outputs from the GROBID pipeline and extracts **method,
 
 ### [4. LLM Claim Extractor](./claim_extractor)
 Takes the outputs of the preceding steps and dynamically synthesizes the text and detached media files to use **Gemini 2.5 Flash** for extracting clean entities, grounded claims, limitations, and future work.
-
-### [5. Critic Agent (Methodological Weakness Analysis)](./critic_agent)
-Analyzes each research paper for methodological weaknesses using a hybrid approach that combines deterministic heuristics with LLM-based reasoning. It identifies flaws such as missing ablations, lack of statistical significance, and weak evaluation setups, assigns severity levels (**HIGH / MEDIUM / LOW**), and produces structured critique outputs. The agent enriches each paper’s JSON with grounded weaknesses, suggestions, and an overall quality assessment, enabling better gap detection and literature review synthesis.
