@@ -19,3 +19,6 @@ Takes the decoupled JSON outputs from the GROBID pipeline and extracts **method,
 
 ### [4. LLM Claim Extractor](./claim_extractor)
 Takes the outputs of the preceding steps and dynamically synthesizes the text and detached media files to use **Gemini 2.5 Flash** for extracting clean entities, grounded claims, limitations, and future work.
+
+### [5. Knowledge Graph Population](./kg_population)
+Consumes the structured JSON outputs from Phase 1 (claims extraction) and builds a fully typed, connected **Knowledge Graph** using SQLite and NetworkX. It uses an LLM for semantic entity clustering and deduplication to reliably map synonymous technical terms across distinct papers into a shared canonical form without losing intentionally nuanced distinctions.
