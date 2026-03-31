@@ -18,7 +18,7 @@ Extracts semantic scientific structure from research PDFs using a hybrid of **GR
 Takes the decoupled JSON outputs from the GROBID pipeline and extracts **method, dataset, metric, and task** entities across all paragraphs, natively including tables and figures, using a SciBERT model fine-tuned on SciIE.
 
 ### [4. LLM Claim Extractor](./claim_extractor)
-Takes the outputs of the preceding steps and dynamically synthesizes the text and detached media files to use **Gemini 2.5 Flash** for extracting clean entities, grounded claims, limitations, and future work.
+Takes the outputs of the preceding steps and dynamically synthesizes the text and detached media files to use a locally-served **Ollama** model (`qwen2.5`) for extracting clean entities, grounded claims, limitations, and future work. The accompanying `ollama_model.ipynb` notebook sets up the GPU-backed Ollama server on **Kaggle** and exposes it via an ngrok tunnel for remote access.
 
 ### [5. Knowledge Graph Population](./kg_population)
 Consumes the structured JSON outputs from Phase 1 (claims extraction) and builds a fully typed, connected **Knowledge Graph** using SQLite and NetworkX. It uses an LLM for semantic entity clustering and deduplication to reliably map synonymous technical terms across distinct papers into a shared canonical form without losing intentionally nuanced distinctions.
