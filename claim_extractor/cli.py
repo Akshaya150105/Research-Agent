@@ -7,8 +7,19 @@ from .pipeline import run_pipeline
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Phase 1 Stage 2: LLM Claim Extraction using Gemini 1.5 Flash.",
+        description="Phase 1 Stage 2: LLM Claim Extraction using Ollama (phi).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Single paper, default local Ollama
+  python -m yourpkg.cli -g ./paper/grobid_output
+
+  # Custom remote Ollama host (e.g. via Kaggle SSH tunnel)
+  python -m yourpkg.cli -g ./paper/grobid_output --ollama-host https://612be70f6a31cf.lhr.life
+
+  # Batch mode
+  python -m yourpkg.cli --batch -g ./papers_root --ollama-host http://localhost:11434
+        """
     )
 
     parser.add_argument(
@@ -23,15 +34,16 @@ def main():
              "Defaults to same as --grobid-dir if not specified."
     )
     parser.add_argument(
-        "--api-key", "-k",
+        "--ollama-host",
         default=None,
-        help="Gemini API key. If not set, reads GEMINI_API_KEY env var."
+        help="Ollama base URL (e.g. http://localhost:11434 or a remote tunnel URL). "
+             "If not set, reads OLLAMA_HOST env var, then falls back to http://localhost:11434."
     )
     parser.add_argument(
         "--rpm",
         type=int,
         default=12,
-        help="Requests per minute (default: 12, free tier limit is 15)."
+        help="Requests per minute throttle (default: 12)."
     )
     parser.add_argument(
         "--batch",
@@ -42,15 +54,14 @@ def main():
 
     args = parser.parse_args()
 
-    api_key = args.api_key or os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print("ERROR: No Gemini API key found.")
-        print("Either pass --api-key or set the GEMINI_API_KEY environment variable.")
-        print("Get a free key at: https://aistudio.google.com/app/apikey")
-        sys.exit(1)
+    # Resolve Ollama host: CLI arg > env var > default
+    ollama_host = (
+        args.ollama_host
+        or os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+    )
+    print(f"[CLI] Using Ollama host: {ollama_host}")
 
     if args.batch:
-        # Batch: walk root, find paper folders containing grobid_output/sections.json
         root = Path(args.grobid_dir)
         grobid_folders = sorted(root.rglob("grobid_output/sections.json"))
 
@@ -61,16 +72,14 @@ def main():
         print(f"[Batch] Found {len(grobid_folders)} papers")
         for i, sections_path in enumerate(grobid_folders):
             grobid_dir = sections_path.parent
-
-            # Find corresponding ner_results folder (sibling of grobid_output)
             paper_root = grobid_dir.parent
-            ner_dir = paper_root / "ner_results"
+            ner_dir    = paper_root / "ner_results"
 
             if not ner_dir.exists():
                 print(f"[Batch] SKIP {paper_root.name} — no ner_results folder found")
                 continue
             if not (ner_dir / "enriched_entities.json").exists():
-                print(f"[Batch] SKIP {paper_root.name} — enriched_entities.json not in ner_results/")
+                print(f"[Batch] SKIP {paper_root.name} — enriched_entities.json missing")
                 continue
 
             print(f"\n[Batch] {i+1}/{len(grobid_folders)}: {paper_root.name}")
@@ -78,7 +87,7 @@ def main():
                 run_pipeline(
                     str(grobid_dir),
                     ner_results_dir=str(ner_dir),
-                    api_key=api_key,
+                    ollama_host=ollama_host,
                     requests_per_minute=args.rpm,
                 )
             except Exception as e:
@@ -87,7 +96,7 @@ def main():
         run_pipeline(
             args.grobid_dir,
             ner_results_dir=args.ner_dir,
-            api_key=api_key,
+            ollama_host=ollama_host,
             requests_per_minute=args.rpm,
         )
 

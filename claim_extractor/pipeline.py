@@ -10,15 +10,16 @@ from .claim_extractor import LLMClaimExtractor
 def run_pipeline(
     grobid_output_dir: str,
     ner_results_dir: Optional[str] = None,
-    api_key: Optional[str] = None,
+    ollama_host: Optional[str] = None,
     requests_per_minute: int = 12,
 ) -> Path:
     """
     Args:
-        grobid_output_dir: folder with sections.json
-        ner_results_dir:   folder with enriched_entities.json (defaults to grobid_output_dir)
-        api_key:           Gemini key or reads GEMINI_API_KEY env var
-        requests_per_minute: default 12 (free tier cap is 15)
+        grobid_output_dir:   folder with sections.json
+        ner_results_dir:     folder with enriched_entities.json (defaults to grobid_output_dir)
+        ollama_host:         Ollama base URL, or reads OLLAMA_HOST env var
+                             (default: http://localhost:11434)
+        requests_per_minute: throttle for Ollama calls (default 12)
 
     Returns:
         Path to claims_output.json
@@ -26,13 +27,7 @@ def run_pipeline(
     grobid_folder = Path(grobid_output_dir)
     ner_folder    = Path(ner_results_dir) if ner_results_dir else grobid_folder
 
-    key = api_key or os.environ.get("GEMINI_API_KEY")
-    if not key:
-        raise ValueError(
-            "No Gemini API key.\n"
-            "Pass --api-key or set GEMINI_API_KEY env var.\n"
-            "Get free key: https://aistudio.google.com/app/apikey"
-        )
+    host = ollama_host or os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
     sections_path = grobid_folder / "sections.json"
     entities_path = ner_folder    / "enriched_entities.json"
@@ -49,6 +44,7 @@ def run_pipeline(
     with open(sections_path, encoding="utf-8") as f:
         sections = json.load(f)
 
+    # Append tables
     tables_path = grobid_folder / "tables.json"
     if tables_path.exists():
         with open(tables_path, "r", encoding="utf-8") as f:
@@ -63,6 +59,7 @@ def run_pipeline(
                     "text": content.strip()
                 })
 
+    # Append figures
     figures_path = grobid_folder / "figures.json"
     if figures_path.exists():
         with open(figures_path, "r", encoding="utf-8") as f:
@@ -80,19 +77,20 @@ def run_pipeline(
     print(f"\n{'='*60}")
     print(f"[Pipeline] Paper:    {paper_title[:70]}")
     print(f"[Pipeline] Sections: {len(sections)}")
-    print(f"[Pipeline] sections.json      : {sections_path}")
-    print(f"[Pipeline] enriched_entities  : {entities_path}")
-    print(f"[Pipeline] claims_output      : {claims_path}")
+    print(f"[Pipeline] Ollama host            : {host}")
+    print(f"[Pipeline] sections.json           : {sections_path}")
+    print(f"[Pipeline] enriched_entities       : {entities_path}")
+    print(f"[Pipeline] claims_output           : {claims_path}")
     print(f"{'='*60}\n")
 
     ner_by_section = existing.get("entities_by_section", {})
-    extractor = LLMClaimExtractor(key, requests_per_minute)
+    extractor = LLMClaimExtractor(ollama_host=host, requests_per_minute=requests_per_minute)
 
-    all_llm_entities    = []
-    all_claims          = []
-    all_limitations     = []
-    all_future_work     = []
-    results_by_section  = {}
+    all_llm_entities   = []
+    all_claims         = []
+    all_limitations    = []
+    all_future_work    = []
+    results_by_section = {}
 
     t0 = time.time()
     for section in sections:
@@ -108,8 +106,8 @@ def run_pipeline(
 
     elapsed = time.time() - t0
 
-    deduped_entities  = _deduplicate_entities(all_llm_entities)
-    llm_entity_index  = _build_index(deduped_entities)
+    deduped_entities = _deduplicate_entities(all_llm_entities)
+    llm_entity_index = _build_index(deduped_entities)
 
     summary = {
         "total_llm_entities": len(deduped_entities),
@@ -147,14 +145,14 @@ def run_pipeline(
     # File 2: claims_output.json — clean standalone output                #
     # ------------------------------------------------------------------ #
     claims_output = {
-        "paper_id":   existing.get("paper_id", ""),
-        "metadata":   existing.get("metadata", {}),
-        "summary":    summary,
-        "entities":   deduped_entities,
+        "paper_id":     existing.get("paper_id", ""),
+        "metadata":     existing.get("metadata", {}),
+        "summary":      summary,
+        "entities":     deduped_entities,
         "entity_index": llm_entity_index,
-        "claims":     all_claims,
-        "limitations": all_limitations,
-        "future_work": all_future_work,
+        "claims":       all_claims,
+        "limitations":  all_limitations,
+        "future_work":  all_future_work,
     }
 
     with open(claims_path, "w", encoding="utf-8") as f:
@@ -164,6 +162,10 @@ def run_pipeline(
     _print_summary(claims_output)
     return claims_path
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _build_index(entities):
     index = {"method": {}, "dataset": {}, "metric": {}, "task": {}}
@@ -200,7 +202,8 @@ def _print_summary(data: dict):
     print(f"\n{'='*60}")
     print(f"PHASE 1 STAGE 2 COMPLETE")
     print(f"{'='*60}")
-    print(f"Paper: {meta.get('title','Unknown')[:70]}")
+    print(f"Paper : {meta.get('title','Unknown')[:70]}")
+    print(f"Model : {s.get('model_used','?')}")
     print()
     print(f"LLM Entities ({s.get('total_llm_entities',0)} unique):")
     for etype, count in s.get("llm_entity_type_counts", {}).items():
