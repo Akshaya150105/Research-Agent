@@ -1,39 +1,3 @@
-"""
-critic_agent.py  v2.2.0  (production)
-======================================
-Person 3 — AI Agents  |  Branch: feat/agents  |  Folder: agents/
-
-Production upgrades over v1.1.0:
-  - LLM hallucination filter: every LLM weakness is cross-checked against
-    structured data (claims, entities, metrics, limitations) before being accepted.
-    If the LLM claims something is missing but it exists in the data, the weakness
-    is rejected and logged as a hallucination.
-  - Severity calibration: year-aware caps prevent over-penalising older papers
-    for norms that didn't exist at time of publication. LLM severity upgrades on
-    heuristic flags are capped — LLM can CONFIRM or DOWNGRADE, but upgrading
-    beyond one level requires explicit evidence grounding.
-  - Heuristic authority: heuristics are ground truth. If heuristics found X present,
-    LLM cannot flag X as missing. Contradiction = rejection.
-  - Filtered weaknesses are logged in react_trace and a separate
-    hallucinations_filtered list in the output for full auditability.
-
-Two-layer design:
-  Layer 1 — Heuristic checks  (fast, deterministic, ground truth)
-  Layer 2 — LLM enrichment    (filtered and validated against structured data)
-
-Output → data_1/agent_outputs/critiques/{paper_id}_critique.json
-
-Usage
------
-python agents/critic_agent.py data_1/parsed/claims_output.json
-python agents/critic_agent.py data_1/parsed/claims_output.json --verbose
-python agents/critic_agent.py data_1/parsed/claims_output.json --no-llm
-
-Put your key in .env in the project root:
-  GEMINI_API_KEY=your_key_here
-  OPENAI_API_KEY=sk-...
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -53,6 +17,45 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import re
+from pathlib import Path
+
+def extract_year(data: dict, file_path: str) -> int | None:
+    """
+    Robust year extraction that works for ANY paper format.
+    """
+
+    meta = data.get("metadata", {})
+    year = meta.get("year")
+
+    # 1. Valid metadata year
+    if isinstance(year, int) and 1900 <= year <= 2025:
+        return year
+
+    # 2. Try arXiv ID (folder name or paper_id)
+    candidates = []
+    candidates.append(Path(file_path).parent.name)
+
+    if "paper_id" in data:
+        candidates.append(data["paper_id"])
+
+    for text in candidates:
+        # arXiv pattern: 1706.03762 or 1706.03762v7
+        match = re.search(r"(\d{2})(\d{2})\.\d+", text)
+        if not match:
+            match = re.search(r"(\d{2})(\d{2})", text)
+
+        if match:
+            yy = int(match.group(1))
+            return 1900 + yy if yy >= 90 else 2000 + yy
+
+    # 3. Try generic 4-digit year
+    for text in candidates:
+        match = re.search(r"(19|20)\d{2}", text)
+        if match:
+            return int(match.group())
+
+    return None
 
 # ─────────────────────────────────────────────
 #  CONFIGURATION
@@ -192,6 +195,8 @@ class CritiqueResult:
     severity_counts:        dict           = field(default_factory=dict)
     overall_quality:        str            = ""
     react_trace:            list[str]      = field(default_factory=list)
+    agent_report: dict = field(default_factory=dict)  
+
 
     def compute_summary(self):
         counts = {s.value: 0 for s in Severity}
@@ -342,6 +347,30 @@ def build_ground_truth_index(data: dict) -> dict:
 
     # Flatten all entity text for keyword matching
     all_entity_text = " ".join(datasets + methods + metrics + tasks).lower()
+
+    paper_id = data.get("paper_id", "")
+    meta = data.get("metadata", {})
+
+    # 🔧 Fix year using robust extractor
+    file_path = data.get("_file_path", "")
+    year = extract_year(data, file_path)
+
+    if year:
+        meta["year"] = year
+
+    if not year or year > 2025:
+        try:
+            prefix = paper_id.split('.')[0]
+            year_prefix = int(prefix[:2])
+
+            if year_prefix >= 90:
+                inferred_year = 1900 + year_prefix
+            else:
+                inferred_year = 2000 + year_prefix
+
+            meta["year"] = inferred_year
+        except:
+            pass
 
     return {
         "datasets":          datasets,
@@ -1171,6 +1200,33 @@ class CriticAgent:
         self._think(f"Loading input from {claims_path}")
         self._act("load_claims_output()")
         data = load_claims_output(claims_path)
+                # 🧪 DEBUG + FORCE YEAR FIX
+        from pathlib import Path
+        import re
+
+        print("DEBUG: RUN FUNCTION EXECUTED")
+        print("DEBUG: file path =", claims_path)
+
+        folder_name = Path(claims_path).parent.name
+        print("DEBUG: folder_name =", folder_name)
+
+        match = re.search(r"(\d{2})(\d{2})", folder_name)
+
+        if match:
+            yy = int(match.group(1))
+            year = 1900 + yy if yy >= 90 else 2000 + yy
+            print("DEBUG: extracted year =", year)
+
+            data.setdefault("metadata", {})["year"] = year
+            print("DEBUG: updated metadata year =", data["metadata"]["year"])
+        data["_file_path"] = str(claims_path)
+        meta = data.get("metadata", {})
+        # 🔧 FORCE year correction at source
+        year = extract_year(data, str(claims_path))
+        if year:
+            data.setdefault("metadata", {})["year"] = year
+
+        # refresh meta AFTER fixing
         meta = data.get("metadata", {})
         self._observe(
             f"Loaded '{meta.get('title','?')}' ({meta.get('year','?')}). "
@@ -1288,8 +1344,82 @@ class CriticAgent:
             f"{len(result.hallucinations_filtered)} filtered. "
             f"Quality: {result.overall_quality}. Depth: {result.depth}."
         )
-        return result
 
+        result.agent_report = {
+            "paper_id": result.paper_id,
+            "critique_id": result.critique_id,
+            "depth": result.depth,
+            "paper_type": result.paper_type,
+            "weakness_count": len(result.weaknesses),
+            "severity_distribution": result.severity_counts,
+            "overall_quality": result.overall_quality,
+            "timestamp": result.generated_at,
+        }
+
+        return result , data
+
+    def as_langgraph_node(self):
+        """
+        Returns a callable for graph.add_node("critic", node_fn).
+        """
+        agent = self
+
+        def node_fn(state: dict) -> dict:
+            papers = state.get("papers_to_critique", [])
+            critiques = dict(state.get("critiques", {}))
+            reports = list(state.get("agent_reports", []))
+
+            for paper_path in papers:
+                result = agent.run(paper_path)
+
+                result.agent_report = {
+                    "agent_name": "critic_agent",
+                    "agent_version": agent.VERSION,
+                    "status": "completed",
+                    "paper_id": result.paper_id,
+                    "depth": result.depth,
+                    "total_weaknesses": len(result.weaknesses),
+                    "has_high_weakness": result.severity_counts.get("HIGH", 0) > 0,
+                    "high_weakness_types": [
+                        w.weakness_type for w in result.weaknesses
+                        if getattr(w.severity, "value", w.severity) == "HIGH"
+                    ],
+                    "duration_seconds": 0.0,
+                    "recommended_next": (
+                        "comparator"
+                        if result.severity_counts.get("HIGH", 0) > 0
+                        else "gap_detector"
+                    ),
+                    "coverage_gained": 0.0,
+                    "planner_signal": {
+                        "recommend_more_papers": result.severity_counts.get("HIGH", 0) > 2,
+                        "recommend_comparator": result.severity_counts.get("HIGH", 0) > 1,
+                        "coverage_concern": len(result.weaknesses) > 5,
+                    },
+                }
+
+                critiques[result.paper_id] = result
+                reports.append(result.agent_report)
+
+            high_concern_count = sum(
+                1
+                for r in critiques.values()
+                if hasattr(r, "severity_counts") and r.severity_counts.get("HIGH", 0) > 0
+            )
+
+            return {
+                "critiques": critiques,
+                "agent_reports": reports,
+                "critic_summary": {
+                    "papers_critiqued": len(papers),
+                    "high_concern_papers": high_concern_count,
+                    "recommended_next": (
+                        "comparator" if high_concern_count > 0 else "gap_detector"
+                    ),
+                },
+            }
+
+        return node_fn
 
 # ─────────────────────────────────────────────
 #  OUTPUT WRITER
@@ -1315,6 +1445,7 @@ def save_critique(result: CritiqueResult, output_dir: pathlib.Path) -> pathlib.P
 def save_enriched_paper_json(
     result: CritiqueResult,
     original_claims_path: str | pathlib.Path,
+    data: dict,
     verbose: bool = False,
 ) -> pathlib.Path | None:
     """
@@ -1337,8 +1468,7 @@ def save_enriched_paper_json(
         return None
 
     try:
-        with open(original_path, encoding="utf-8") as f:
-            paper_data = json.load(f)
+        paper_data = data
 
         # Build the critiques array — one entry per accepted weakness
         critiques_array = []
@@ -1477,7 +1607,7 @@ Examples:
     agent = CriticAgent(llm_backend=backend, verbose=args.verbose)
 
     try:
-        result = agent.run(args.input)
+        result, data = agent.run(args.input)
     except FileNotFoundError as e:
         print(f"\n❌ {e}", file=sys.stderr); sys.exit(1)
     except ValueError as e:
@@ -1488,7 +1618,7 @@ Examples:
     print(f"\n  ✅ Saved to: {out_path}")
 
     # Write-back: inject critique into the original paper JSON
-    enriched_path = save_enriched_paper_json(result, args.input, verbose=args.verbose)
+    enriched_path = save_enriched_paper_json(result, args.input,data,verbose=args.verbose)
     if enriched_path:
         print(f"  ✅ Enriched paper JSON: {enriched_path}\n")
     else:
