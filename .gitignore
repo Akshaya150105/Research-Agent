@@ -53,7 +53,7 @@ Data/
 Thumbs.db
 
 #test outputs
-data_1/parsed/test/
+data_1/parsed/
 
 #memory
 memory/

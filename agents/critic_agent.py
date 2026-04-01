@@ -63,14 +63,21 @@ def extract_year(data: dict, file_path: str) -> int | None:
 
 OUTPUT_DIR = pathlib.Path("data_1/agent_outputs/critiques")
 
-OPENAI_URL = "https://api.openai.com/v1/chat/completions"
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+OLLAMA_HOST      = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_MODEL     = "qwen2.5"
 
 ABLATION_KEYWORDS = [
     "ablation", "ablate", "sensitivity analysis",
     "component analysis", "remove", "without",
     "w/o", "effect of", "contribution of",
 ]
+
+VARIANT_KEYWORDS = [
+    "variant", "variants", "different versions",
+    "we test", "we compare", "configuration",
+    "setting", "hyperparameter", "heads", "layers"
+]
+
 SIGNIFICANCE_KEYWORDS = [
     "p<", "p <", "p-value", "t-test", "wilcoxon",
     "statistical significance", "confidence interval",
@@ -383,7 +390,7 @@ def build_ground_truth_index(data: dict) -> dict:
         "n_limitations":     len(data.get("limitations", [])),
         "n_future_work":     len(data.get("future_work", [])),
         "n_claims":          len(data.get("claims", [])),
-        "has_ablation":      any(kw in all_claim_text for kw in ABLATION_KEYWORDS),
+        "has_ablation":      detect_ablation_signals(all_claim_text),
         "has_significance":  any(kw in all_claim_text for kw in SIGNIFICANCE_KEYWORDS),
         "has_reproducibility": any(kw in full_text for kw in REPRODUCIBILITY_KEYWORDS),
         "has_speed_metrics": any(kw in all_entity_text + all_claim_text for kw in SPEED_KEYWORDS),
@@ -392,6 +399,25 @@ def build_ground_truth_index(data: dict) -> dict:
         "all_entity_text":   all_entity_text,
     }
 
+def detect_ablation_signals(text: str) -> bool:
+    """
+    Improved ablation detection using multiple signals:
+    - keyword match (existing)
+    - variant/config comparison
+    - structural signal (multiple model comparisons)
+    """
+    text = text.lower()
+
+    keyword_hit = any(k in text for k in ABLATION_KEYWORDS)
+    variant_hit = any(k in text for k in VARIANT_KEYWORDS)
+
+    # Structural signal: multiple mentions of model + comparison words
+    structural_hit = (
+        text.count("model") >= 3 and
+        ("compare" in text or "different" in text or "vary" in text)
+    )
+
+    return keyword_hit or variant_hit or structural_hit
 
 # ─────────────────────────────────────────────
 #  HALLUCINATION FILTER
@@ -564,56 +590,55 @@ def validate_severity_adjustment(
 # ─────────────────────────────────────────────
 
 def _llm_call_raw(prompt: str, llm_backend: str) -> str:
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
+    """
+    Call Ollama /api/generate with format='json' so the model is
+    constrained to produce valid JSON output.
+    All prompts in this agent already end with 'Reply with ONLY valid JSON'
+    instructions — the format='json' flag enforces this at the API level.
+    """
+    if llm_backend != "ollama":
+        raise EnvironmentError(
+            f"Unsupported LLM backend '{llm_backend}'. Only 'ollama' is supported."
+        )
 
-    if llm_backend == "openai" and not openai_key:
-        raise EnvironmentError("OPENAI_API_KEY not set")
-    if llm_backend == "gemini" and not gemini_key:
-        raise EnvironmentError("GEMINI_API_KEY not set")
-
-    last_error = None
+    ollama_host = OLLAMA_HOST.rstrip("/")
+    last_error  = None
 
     for attempt in range(1, LLM_MAX_RETRIES + 1):
         try:
-            if llm_backend == "gemini":
-                resp = requests.post(
-                    f"{GEMINI_URL}?key={gemini_key}",
-                    json={
-                        "contents": [{"parts": [{"text": prompt}]}],
-                        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 8192},
+            resp = requests.post(
+                f"{ollama_host}/api/generate",
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0",
+                    "ngrok-skip-browser-warning": "true",
+                },
+                json={
+                    "model":  OLLAMA_MODEL,
+                    "prompt": prompt,
+                    "stream": False,
+                    "format": "json",           # Ollama-native JSON mode — enforces valid JSON
+                    "options": {
+                        "temperature": 0.0,     # Deterministic output
+                        "num_predict": 4096,
                     },
-                    timeout=LLM_TIMEOUT_SECONDS,
-                )
-            else:
-                resp = requests.post(
-                    OPENAI_URL,
-                    headers={"Authorization": f"Bearer {openai_key}",
-                             "Content-Type": "application/json"},
-                    json={
-                        "model":       "gpt-4o-mini",
-                        "messages":    [{"role": "user", "content": prompt}],
-                        "temperature": 0.2,
-                        "max_tokens":  4096,
-                    },
-                    timeout=LLM_TIMEOUT_SECONDS,
-                )
+                },
+                timeout=LLM_TIMEOUT_SECONDS,
+            )
 
-            if resp.status_code == 429:
+            if resp.status_code == 503:
                 delay = LLM_RETRY_BASE_DELAY * (2 ** (attempt - 1))
                 if attempt < LLM_MAX_RETRIES:
+                    print(f"  [llm] Ollama 503 (attempt {attempt}/{LLM_MAX_RETRIES}). Retrying in {delay}s...")
                     time.sleep(delay)
                     continue
-                raise RuntimeError(f"Rate limited (429) after {LLM_MAX_RETRIES} attempts")
+                raise RuntimeError(f"Ollama unavailable (503) after {LLM_MAX_RETRIES} attempts")
 
             resp.raise_for_status()
-            raw = resp.json()
+            data = resp.json()
+            return data.get("response", "").strip()
 
-            if llm_backend == "gemini":
-                return raw["candidates"][0]["content"]["parts"][0]["text"]
-            return raw["choices"][0]["message"]["content"]
-
-        except (requests.RequestException, KeyError, IndexError) as e:
+        except (requests.RequestException, KeyError) as e:
             last_error = e
             if attempt < LLM_MAX_RETRIES:
                 time.sleep(LLM_RETRY_BASE_DELAY * (2 ** (attempt - 1)))
@@ -1027,6 +1052,13 @@ Severity guide:
   MEDIUM = limits generalisation or strength of claims
   LOW    = minor best-practice miss
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STRICT OUTPUT RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Return ONLY a single valid JSON object. No markdown fences, no preamble, no explanation, nothing before or after.
+- Empty lists must be [] not null.
+- Do not invent content not supported by the paper information above.
+
 Reply with ONLY valid JSON — no markdown fences, no extra text:
 
 {{
@@ -1279,8 +1311,7 @@ class CriticAgent:
         # Step 4: LLM enrichment with hallucination filtering
         self._think(f"LLM backend: '{self.llm_backend}'. Running filtered enrichment.")
 
-        if self.llm_backend in ("openai", "gemini"):
-            time.sleep(15)  # rate limit breathing room
+        if self.llm_backend == "ollama":
             self._act(f"llm_enrich() via {self.llm_backend}")
             result.depth = "deep"
             try:
@@ -1571,9 +1602,19 @@ def print_summary(result: CritiqueResult):
 # ─────────────────────────────────────────────
 
 def detect_llm_backend() -> str:
-    if os.environ.get("OPENAI_API_KEY"): return "openai"
-    if os.environ.get("GEMINI_API_KEY"): return "gemini"
+    if os.environ.get("OLLAMA_HOST") or _ollama_is_reachable():
+        return "ollama"
     return "none"
+
+
+def _ollama_is_reachable() -> bool:
+    """Quick ping to check if Ollama is running at the default host."""
+    try:
+        r = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        return r.status_code == 200
+    except Exception:
+        return False
 
 
 def main():
@@ -1588,11 +1629,20 @@ Examples:
         """,
     )
     parser.add_argument("input",  help="Path to claims_output.json")
-    parser.add_argument("--llm",  choices=["openai", "gemini", "auto"], default="auto")
+    parser.add_argument("--llm",  choices=["ollama", "auto"], default="auto")
+    parser.add_argument("--ollama-host", default=None,
+                        help="Ollama host URL (overrides OLLAMA_HOST env var, default: http://localhost:11434)")
     parser.add_argument("--no-llm",     action="store_true")
     parser.add_argument("--output-dir", default=str(OUTPUT_DIR))
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
+
+    # Allow CLI override of Ollama host
+    if args.ollama_host:
+        os.environ["OLLAMA_HOST"] = args.ollama_host
+        import importlib, sys as _sys
+        # Refresh module-level OLLAMA_HOST constant
+        globals()["OLLAMA_HOST"] = args.ollama_host
 
     backend = "none" if args.no_llm else (
         detect_llm_backend() if args.llm == "auto" else args.llm
