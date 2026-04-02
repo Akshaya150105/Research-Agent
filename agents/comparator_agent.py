@@ -1090,8 +1090,17 @@ CLASSIFY each contradiction:
   explains    — setup difference (optimizer, LR, hardware) explains the gap
   complements — different goals, both valid
   neutral     — not enough info
+  false_positive — data extraction error or outlier (e.g. comparing values of different orders of magnitude)
 
-SETUP REASONING: If optimizer or LR differ significantly, prefer "explains".
+UNIVERSAL DATA VALIDATION RULES:
+1. Examine the values in "CONTRADICTION CANDIDATES". If one value is an extreme outlier (e.g., 10x smaller or larger) compared to the other for the same metric/dataset, classify it as "false_positive".
+2. Check for "Units Mismatch": If the code compares a percentage-scale value (e.g., 0.95) to a point-scale value (e.g., 95.0), classify as "false_positive".
+3. Check for "Context Mismatch": If a value looks like a hyperparameter (e.g., 0.001) or loss value but is being compared against a performance metric, classify as "false_positive".
+4. IGNORE all "false_positive" findings when determining the "overall_relationship".
+
+SETUP REASONING: 
+- If optimizer or LR differ significantly, prefer "explains". 
+- If Paper B uses the same core architecture as Paper A but achieves better results by scaling up the hardware, dataset size, or batch size, the relationship is "extends".
 
 overall_relationship: contradicts | complements | extends | parallel | neutral
 

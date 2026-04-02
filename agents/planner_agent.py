@@ -203,6 +203,32 @@ def _vlog(state: AgentState, agent: str, msg: str) -> None:
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         print(f"  [{ts}][planner→{agent}] {msg}")
 
+# ─────────────────────────────────────────────────────────────
+#  LLM BACKEND DETECTION helpers
+# ─────────────────────────────────────────────────────────────
+
+def _detect_gemini_backend(use_llm: bool) -> str:
+    """Gemini backend — used by Comparator and Writer."""
+    return "gemini" if (use_llm and os.environ.get("GEMINI_API_KEY")) else "none"
+
+
+def _detect_ollama_backend(use_llm: bool) -> str:
+    """
+    Ollama backend — used by Critic and Gap Detector.
+    Checks OLLAMA_HOST env var or tries localhost:11434.
+    """
+    if not use_llm:
+        return "none"
+    # Try OLLAMA_HOST or default
+    host = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+    try:
+        import requests
+        r = requests.get(f"{host}/api/tags", timeout=3)
+        if r.status_code == 200:
+            return "ollama"
+    except Exception:
+        pass
+    return "none"
 
 def node_reader(state: AgentState) -> dict:
     """
@@ -289,67 +315,57 @@ def node_comparator(state: AgentState) -> dict:
 
 def node_critic(state: AgentState) -> dict:
     """
-    Node 3 — Critic (teammate's agent).
-    Checks each paper for methodological weaknesses.
-    Writes critiques to data_1/agent_outputs/critiques/.
+    Node 3 — Critic.
+    Now simplified to match the node_comparator style.
     """
     _vlog(state, "critic", "Starting")
 
     if not CRITIC_AVAILABLE:
-        _vlog(state, "critic", "Skipped — not installed")
-        return {
-            "critic_report": {"skipped": True, "weaknesses_found": 0},
-            "step_count":    state.get("step_count", 0) + 1,
-            "react_trace":   ["[critic] skipped — not installed"],
-        }
+        return {"critic_report": {"skipped": True}, "react_trace": ["[critic] skipped"]}
 
-    try:
-        agent      = CriticAgent(verbose=state.get("verbose", False))
-        updated    = agent.run(dict(state))
-        critic_rep = updated.get("critic_report", {})
-        _vlog(state, "critic", "Done")
-    except Exception as e:
-        _vlog(state, "critic", f"Error: {e}")
-        critic_rep = {"error": str(e)}
+    # Logic: Critic uses Ollama/Local, not Gemini
+    backend = "ollama" if (state.get("use_llm") and _detect_ollama_backend(True) == "ollama") else "none"
+    
+    agent = CriticAgent(
+        llm_backend=backend,
+        verbose=state.get("verbose", False)
+    )
+    
+    # One call does everything (Looping, Saving, Reporting)
+    report = agent.run_session(dict(state))
 
     return {
-        "critic_report": critic_rep,
+        "critic_report": report,
         "step_count":    state.get("step_count", 0) + 1,
-        "react_trace":   ["[critic] done"],
+        "react_trace":   report.get("react_trace", [f"[critic] done: {report['total_weaknesses']} weaknesses"])
     }
 
 
 def node_gap_detector(state: AgentState) -> dict:
     """
-    Node 4 — Gap Detector (teammate's agent).
-    Finds unexplored method-dataset combinations and clusters limitations.
-    Writes to data_1/agent_outputs/gaps/.
+    Node 4 — Gap Detector.
+    Simplified to match the node_comparator / node_critic style.
     """
     _vlog(state, "gap_detector", "Starting")
 
     if not GAP_AVAILABLE:
-        _vlog(state, "gap_detector", "Skipped — not installed")
-        return {
-            "gap_report":  {"gaps": [], "skipped": True},
-            "step_count":  state.get("step_count", 0) + 1,
-            "react_trace": ["[gap_detector] skipped — not installed"],
-        }
+        return {"gap_report": {"gaps": [], "skipped": True}, "react_trace": ["[gap] skipped"]}
 
-    try:
-        agent    = GapDetectorAgent(verbose=state.get("verbose", False))
-        updated  = agent.run(dict(state))
-        gap_rep  = updated.get("gap_report", {"gaps": []})
-        n_gaps   = len(gap_rep.get("gaps", []))
-        _vlog(state, "gap_detector", f"Done — {n_gaps} gaps detected")
-    except Exception as e:
-        _vlog(state, "gap_detector", f"Error: {e}")
-        gap_rep = {"gaps": [], "error": str(e)}
-        n_gaps  = 0
+    # Pass 'ollama' if LLM is enabled and Ollama is running
+    backend = "ollama" if (state.get("use_llm") and _detect_ollama_backend(True) == "ollama") else "none"
+    
+    agent = GapDetectorAgent(
+        llm_backend=backend,
+        verbose=state.get("verbose", False)
+    )
+    
+    # Call the new Smart Agent method
+    report = agent.run_session(dict(state))
 
     return {
-        "gap_report":  gap_rep,
+        "gap_report":  report,
         "step_count":  state.get("step_count", 0) + 1,
-        "react_trace": [f"[gap_detector] {n_gaps} gaps detected"],
+        "react_trace": report.get("react_trace", [f"[gap] {report.get('n_gaps', 0)} gaps detected"])
     }
 
 

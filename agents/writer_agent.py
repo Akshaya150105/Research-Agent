@@ -151,16 +151,11 @@ def _load_papers_from_db(db_path: pathlib.Path) -> list[dict]:
     if not db_path.exists():
         return []
     conn = sqlite3.connect(db_path)
-    try:
-        # Check if the 'action' column exists, add it if not
-        conn.execute("ALTER TABLE papers ADD COLUMN action TEXT DEFAULT 'read'")
-        conn.commit()
-    except Exception:
-        pass
-    
     conn.row_factory = sqlite3.Row
+    # REMOVED: WHERE action = 'read'
+    # This ensures papers already in DB are included in the review
     rows = conn.execute(
-        "SELECT * FROM papers WHERE action = 'read' ORDER BY year"
+        "SELECT * FROM papers ORDER BY year"
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -220,22 +215,29 @@ def _load_limitations_from_memory(paper_id: str, memory_dir: pathlib.Path) -> li
 
 def _load_comparisons(comparisons_dir: pathlib.Path) -> list[dict]:
     results = []
-    if not comparisons_dir.exists():
+    # Use resolve() to handle Windows pathing and glob strictly
+    abs_path = comparisons_dir.resolve()
+    if not abs_path.exists():
         return results
-    for path in sorted(comparisons_dir.glob("*.json")):
+    
+    for path in abs_path.glob("*.json"):
         try:
             with open(path, encoding="utf-8") as f:
-                results.append(json.load(f))
-        except Exception:
-            pass
+                data = json.load(f)
+                if data: # Ensure not empty
+                    results.append(data)
+        except Exception as e:
+            print(f"DEBUG: Writer failed to load comparison {path.name}: {e}")
     return results
 
 
 def _load_critiques(critiques_dir: pathlib.Path) -> list[dict]:
     results = []
-    if not critiques_dir.exists():
+    abs_path = critiques_dir.resolve()
+    if not abs_path.exists():
         return results
-    for path in sorted(critiques_dir.glob("*.json")):
+        
+    for path in abs_path.glob("*_critique.json"):
         try:
             with open(path, encoding="utf-8") as f:
                 results.append(json.load(f))
