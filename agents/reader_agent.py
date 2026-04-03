@@ -378,7 +378,7 @@ class ExtractionPipeline:
         if self.db_path.exists() or True:   # always attempt
             ok = self._run_cmd(
                 [
-                    sys.executable, "kg_population.py",
+                    sys.executable, "kg_population/kg_population.py",
                     "--inputs",  str(self.claims_output_json),
                     "--db",      str(self.db_path),
                     "--gexf",    str(self.gexf_path),
