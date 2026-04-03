@@ -106,6 +106,9 @@ class AgentState(TypedDict, total=False):
     # Session config — set once at start
     session_id:              str
     topic:                   str
+    papers_dir:              str   
+    ollama_host:             str   
+    no_extraction:           bool
     memory_dir:              str
     use_llm:                 bool
     verbose:                 bool
@@ -465,6 +468,9 @@ class PlannerAgent:
         self,
         topic:      str  = "",
         memory_dir: str  = "memory",
+        papers_dir: str  = "data_1/papers",      # NEW
+        ollama_host: str = "",          # NEW
+        no_extraction: bool = False,
         use_llm:    bool = True,
     ) -> dict:
         """
@@ -475,10 +481,19 @@ class PlannerAgent:
         session_id = str(uuid.uuid4())[:8]
         self._print(f"Session {session_id} | topic='{topic}' | llm={use_llm}")
 
+        resolved_ollama = (
+            ollama_host 
+            or os.environ.get("OLLAMA_HOST", "") 
+            or "http://localhost:11434"
+        )
+
         initial: AgentState = {
             "session_id":              session_id,
             "topic":                   topic,
+            "papers_dir":              papers_dir,      # NEW
             "memory_dir":              memory_dir,
+            "ollama_host":             resolved_ollama, # NEW
+            "no_extraction":           no_extraction or (not use_llm), # NEW (Auto-skip if no LLM)
             "use_llm":                 use_llm,
             "verbose":                 self.verbose,
             "step_count":              0,
@@ -609,23 +624,25 @@ class PlannerAgent:
 
 def main():
     parser = argparse.ArgumentParser(
-        description=f"Planner Agent v{PlannerAgent.VERSION} — full research pipeline"
+        description=f"Planner Agent v1.1.0 — full research pipeline"
     )
-    parser.add_argument("--topic",      default="",
-                        help="Research topic (e.g. 'neural machine translation')")
-    parser.add_argument("--memory-dir", default="memory",
-                        help="Path to memory/ folder (default: memory)")
-    parser.add_argument("--no-llm",     action="store_true",
-                        help="Disable all LLM calls — heuristic-only mode")
-    parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Print detailed trace from every agent")
+    parser.add_argument("--topic",      default="")
+    parser.add_argument("--memory-dir", default="memory")
+    parser.add_argument("--papers-dir", default="data_1/papers", help="Where raw PDFs live") # NEW
+    parser.add_argument("--ollama-host", default="", help="Ollama URL") # NEW
+    parser.add_argument("--no-extraction", action="store_true", help="Skip PDF processing") # NEW
+    parser.add_argument("--no-llm",     action="store_true")
+    parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
     planner = PlannerAgent(verbose=args.verbose)
     planner.run(
-        topic      = args.topic,
-        memory_dir = args.memory_dir,
-        use_llm    = not args.no_llm,
+        topic         = args.topic,
+        memory_dir    = args.memory_dir,
+        papers_dir    = args.papers_dir,      # NEW
+        ollama_host   = args.ollama_host,     # NEW
+        no_extraction = args.no_extraction,   # NEW
+        use_llm       = not args.no_llm,
     )
 
 
