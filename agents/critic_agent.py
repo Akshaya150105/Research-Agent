@@ -1209,6 +1209,8 @@ class CriticAgent:
         self.llm_backend = llm_backend
         self.verbose     = verbose
         self.trace: list[str] = []
+        self._total_weaknesses = 0
+        self._high_concern_count = 0
 
     def _think(self, msg: str):
         entry = f"[THINK] {msg}"
@@ -1224,6 +1226,66 @@ class CriticAgent:
         entry = f"[OBS]   {msg}"
         self.trace.append(entry)
         if self.verbose: print(f"  {entry}")
+
+    def run_session(self, session_state: dict) -> dict:
+        """
+        MATCHES COMPARATOR STYLE:
+        Takes the full session state, finds papers to process, 
+        and returns a summary report.
+        """
+        self._think("Starting Critic Session")
+        
+        # 1. Identify papers to process from the state
+        rr = session_state.get("reader_report", {})
+        paper_ids = rr.get("paper_ids_read", [])
+        memory_dir = pathlib.Path(session_state.get("memory_dir", "memory"))
+
+        if not paper_ids:
+            self._observe("No new papers to critique. Checking for existing papers...")
+            # Optional: Fallback to all papers if reader didn't run
+            paper_ids = [p.name for p in memory_dir.iterdir() if p.is_dir()]
+
+        if not paper_ids:
+            self._observe("No papers found — skipping.")
+            return self._build_session_report(0)
+
+        self._observe(f"Papers to critique: {paper_ids}")
+
+        # 2. Internal loop over papers (Logic moved here from Planner)
+        for pid in paper_ids:
+            path = memory_dir / pid / "claims_output.json"
+            if not path.exists():
+                continue
+
+            self._think(f"Critiquing: {pid}")
+            try:
+                # Call existing logic
+                result, data = self.run(path)
+                
+                # 3. Internal Write-back (Shared Memory)
+                save_critique(result, OUTPUT_DIR)
+                save_enriched_paper_json(result, path, data, verbose=self.verbose)
+                
+                # Update session stats
+                self._total_weaknesses += len(result.weaknesses)
+                if result.severity_counts.get("HIGH", 0) > 0:
+                    self._high_concern_count += 1
+            except Exception as e:
+                self._observe(f"⚠ Failed on {pid}: {e}")
+
+        return self._build_session_report(len(paper_ids))
+
+    def _build_session_report(self, n_papers: int) -> dict:
+        """Builds the final dictionary to return to the Planner."""
+        return {
+            "agent": "critic_agent",
+            "agent_version": self.VERSION,
+            "papers_critiqued": n_papers,
+            "total_weaknesses": self._total_weaknesses,
+            "high_concern_papers": self._high_concern_count,
+            "overall_quality": "CONCERN" if self._high_concern_count > 0 else "ACCEPTABLE",
+            "react_trace": self.trace
+        }
 
     def run(self, claims_path: str | pathlib.Path) -> CritiqueResult:
         claims_path = pathlib.Path(claims_path)

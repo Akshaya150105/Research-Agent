@@ -1213,6 +1213,86 @@ class GapDetectorAgent:
         self.trace.append(entry)
         if self.verbose: print(f"  {entry}")
 
+    def run_session(self, session_state: dict) -> dict:
+        """
+        MATCHES COMPARATOR/CRITIC STYLE:
+        Takes the full session state, finds the right paper paths,
+        runs detection, and returns a summary report.
+        """
+        self._think("Starting Gap Detection Session")
+        
+        # 1. Self-Discovery of Paper Paths
+        rr = session_state.get("reader_report", {})
+        paper_ids = rr.get("paper_ids_read", [])
+        memory_dir = pathlib.Path(session_state.get("memory_dir", "memory"))
+
+        # Fallback to all folders if no new papers were read in this specific step
+        if not paper_ids:
+            self._observe("No new papers from reader. Checking memory/ for existing data...")
+            paper_ids = [p.name for p in memory_dir.iterdir() if p.is_dir()]
+
+        resolved_paths = []
+        for pid in paper_ids:
+            # CRITICAL: Prefer enriched JSON from Critic so we get the priority boost!
+            enriched = memory_dir / pid / f"{pid}_enriched.json"
+            raw = memory_dir / pid / "claims_output.json"
+            
+            target = enriched if enriched.exists() else raw
+            if target.exists():
+                resolved_paths.append(target)
+
+        if not resolved_paths:
+            self._observe("No valid paper files found — skipping.")
+            return self._build_session_report(None)
+
+        self._observe(f"Analyzing {len(resolved_paths)} paper(s) for research gaps.")
+
+        # 2. Run the internal detection logic
+        try:
+            # We pass the list of paths to the existing run() method
+            result = self.run(resolved_paths)
+            
+            # 3. Internal Write-back (Shared Memory)
+            out_path = save_gaps(result, OUTPUT_DIR)
+            self._observe(f"Gaps saved to {out_path.name}")
+            
+            return self._build_session_report(result)
+            
+        except Exception as e:
+            self._observe(f"⚠ Gap Detection crashed: {e}")
+            return self._build_session_report(None)
+
+    def _build_session_report(self, result: GapResult | None) -> dict:
+        """Builds the dictionary the Planner expects."""
+        if not result:
+            return {
+                "agent": "gap_detector_agent",
+                "n_gaps": 0,
+                "gaps": [],
+                "react_trace": self.trace
+            }
+        
+        # Convert Gap objects to serializable dicts
+        gap_list = []
+        for g in result.gaps:
+            gap_list.append({
+                "gap_id": g.gap_id,
+                "gap_type": g.gap_type.value,
+                "priority": g.priority.value,
+                "description": g.description,
+                "confidence": round(g.confidence, 2),
+                "status": g.addressed_status.value
+            })
+
+        return {
+            "agent": "gap_detector_agent",
+            "agent_version": self.VERSION,
+            "n_gaps": len(gap_list),
+            "gaps": gap_list,
+            "gap_counts": result.gap_counts,
+            "react_trace": self.trace
+        }
+
     def run(self, paper_paths: list[str | pathlib.Path]) -> GapResult:
 
         session_id = uuid.uuid4().hex[:8]

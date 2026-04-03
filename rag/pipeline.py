@@ -34,6 +34,12 @@ Usage — querying:
         print(f"[{r['chunk_type']}] {r['document']}")
         print(f"  paper: {r['paper_id']}  score: {r['score']}")
 """
+"""
+pipeline.py
+-----------
+Updated with Incremental Indexing logic: 
+Automatically deletes old paper data from ChromaDB before re-indexing.
+"""
 
 import logging
 from pathlib import Path
@@ -46,25 +52,11 @@ logger = logging.getLogger(__name__)
 def index_paper(folder_path: str) -> dict:
     """
     Full indexing pipeline for one paper.
-    Reads paper_id from claims_output.json directly.
-
-    Steps:
-        1. chunk_paper()   — reads 3 JSON files, produces chunk dicts
-        2. embed_chunks()  — adds 768-dim embedding to each chunk
-        3. index_chunks()  — upserts into ChromaDB collections
-
-    Does NOT run enricher — call enrich() after all papers are indexed.
-
-    Args:
-        folder_path: Path to the paper's output_folder.
-                     e.g. "memory/stgcn_yu_2018"
-
-    Returns:
-        Dict with paper_id and chunk counts per collection.
+    NOW INCREMENTAL: Clears old data for this paper ID before starting.
     """
     from rag.chunker  import chunk_paper
     from rag.embedder import embed_chunks
-    from rag.indexer  import index_chunks
+    from rag.indexer  import index_chunks, delete_paper  # <--- Added delete_paper
     from rag.utils.paper_id import paper_id_from_folder
 
     folder   = Path(folder_path)
@@ -75,9 +67,15 @@ def index_paper(folder_path: str) -> dict:
     print(f"  Folder  : {folder.resolve()}")
     print(f"{'='*60}\n")
 
+    # --- STEP 0: INCREMENTAL CLEANUP ---
+    # This ensures no DuplicateIDErrors if the paper was previously 
+    # indexed or if a previous run crashed.
+    print(f"  Step 0/3 — Clearing old data for '{paper_id}'...")
+    delete_paper(paper_id)
+
     # step 1 — chunk
     print("  Step 1/3 — Chunking...")
-    chunks = chunk_paper(str(folder), paper_id)
+    chunks = chunk_paper(str(folder))
 
     # step 2 — embed
     print("  Step 2/3 — Embedding...")
@@ -99,14 +97,7 @@ def index_paper(folder_path: str) -> dict:
 def index_all(memory_dir: str = "memory") -> list[dict]:
     """
     Indexes all paper folders found in memory_dir.
-    Skips folders that don't contain claims_output.json.
-    Does NOT run enricher — call enrich() after.
-
-    Args:
-        memory_dir: Path to the memory folder containing paper subfolders.
-
-    Returns:
-        List of result dicts, one per paper indexed.
+    Each paper is handled independently (Incremental).
     """
     memory = Path(memory_dir)
     if not memory.exists():
@@ -125,6 +116,8 @@ def index_all(memory_dir: str = "memory") -> list[dict]:
           f"{[f.name for f in folders]}")
 
     results = []
+    # Because index_paper now contains delete_paper, 
+    # this loop is safe to run as many times as you want.
     for folder in sorted(folders):
         result = index_paper(str(folder))
         results.append(result)
@@ -137,14 +130,6 @@ def index_all(memory_dir: str = "memory") -> list[dict]:
 def enrich() -> dict:
     """
     Runs cross-paper enrichment. Call this once after all papers are indexed.
-
-    Passes:
-        1. Entity linking — populates also_in_papers across papers
-        2. Contradiction candidates — writes memory/contradiction_candidates.json
-        3. Gap matrix — writes memory/gap_matrix.json
-
-    Returns:
-        Summary dict from enricher.
     """
     from rag.enricher import run_all_passes
 
@@ -160,24 +145,6 @@ def enrich() -> dict:
 
 def query(question: str, top_k: int = 5,
           known_methods: list = None) -> list[dict]:
-    """
-    Answers a question against the indexed papers.
-
-    Steps:
-        1. parse_query()  — detects intent, builds filter
-        2. embed_query()  — embeds the question
-        3. ChromaDB ANN   — fetches candidates with filter
-        4. cross-encoder  — re-ranks candidates
-        5. returns top_k  — with full provenance
-
-    Args:
-        question:      Natural language question.
-        top_k:         Number of results to return (default 5).
-        known_methods: Optional list of method names for query enrichment.
-
-    Returns:
-        List of result dicts sorted by score descending.
-    """
     from rag.retriever import retrieve
     return retrieve(question, top_k=top_k, known_methods=known_methods)
 

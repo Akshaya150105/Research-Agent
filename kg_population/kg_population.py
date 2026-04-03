@@ -297,11 +297,16 @@ CREATE TABLE IF NOT EXISTS claims (
 
 -- Session / action log
 CREATE TABLE IF NOT EXISTS session_log (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp   TEXT DEFAULT (datetime('now')),
-    agent       TEXT,
-    action      TEXT,
-    detail      TEXT
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id     TEXT NOT NULL DEFAULT 'default', -- Added default to avoid null errors
+    timestamp      TEXT DEFAULT (datetime('now')),
+    agent          TEXT,
+    action         TEXT,
+    detail         TEXT,
+    input_summary  TEXT DEFAULT '',                 -- Fixed: Permanent column
+    output_summary TEXT DEFAULT '',                 -- Fixed: Permanent column
+    confidence     REAL DEFAULT 1.0, 
+    duration_ms    INTEGER DEFAULT 0 
 );
 """
 
@@ -371,10 +376,12 @@ class KnowledgeGraphBuilder:
             if etype in self._entity_key_cache:
                 self._entity_key_cache[etype].add(ckey)
 
-    def _log(self, agent: str, action: str, detail: str):
+    def _log(self, agent: str, action: str, detail: str, input_sum: str = "", output_sum: str = ""):
         self.conn.execute(
-            "INSERT INTO session_log (agent, action, detail) VALUES (?,?,?)",
-            (agent, action, detail),
+            """INSERT INTO session_log 
+               (session_id, agent, action, detail, input_summary, output_summary) 
+               VALUES (?,?,?,?,?,?)""",
+            ("kg_builder_session", agent, action, detail, input_sum, output_sum),
         )
         self.conn.commit()
         print(f"[{agent}] {action}: {detail}")
