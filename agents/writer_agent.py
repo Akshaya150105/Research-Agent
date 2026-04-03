@@ -62,6 +62,7 @@ from typing import Optional
 
 import requests
 from dotenv import load_dotenv
+from shared_schema import ensure_schema as _ensure_db_schema
 
 load_dotenv()
 
@@ -166,17 +167,26 @@ def _load_entities_for_paper(paper_id: str, db_path: pathlib.Path) -> dict[str, 
         return {}
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT text, entity_type FROM entities WHERE paper_id = ?",
-        (paper_id,)
-    ).fetchall()
+    
+    # NEW QUERY: Must join with paper_entity_relationships to find which 
+    # canonical entities belong to this specific paper.
+    query = """
+        SELECT e.canonical_text, e.entity_type 
+        FROM entities e
+        JOIN paper_entity_relationships r ON e.entity_id = r.entity_id
+        WHERE r.paper_id = ?
+    """
+    
+    rows = conn.execute(query, (paper_id,)).fetchall()
     conn.close()
+    
     result: dict[str, list] = {}
     for row in rows:
         etype = row["entity_type"]
         result.setdefault(etype, [])
-        if row["text"] not in result[etype]:
-            result[etype].append(row["text"])
+        # Use canonical_text instead of the old 'text' column
+        if row["canonical_text"] not in result[etype]:
+            result[etype].append(row["canonical_text"])
     return result
 
 

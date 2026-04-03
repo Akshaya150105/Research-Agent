@@ -257,6 +257,8 @@ def node_reader(state: AgentState) -> dict:
           f"skipped={rr.get('papers_skipped',0)}, "
           f"already_in_db={rr.get('papers_already_in_db',0)}, "
           f"coverage={coverage:.2f}")
+    
+    print("DB_PATH =", DB_PATH)
 
     return {
         "reader_report":  rr,
@@ -513,6 +515,7 @@ class PlannerAgent:
 
         self._write_session_log(final_state)
         self._print_summary(final_state)
+        print("LOG DB =", DB_PATH)
         return final_state
 
     # ── Sequential fallback (no LangGraph) ───────────────────

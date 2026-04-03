@@ -1,30 +1,70 @@
+"""
+kg_population.py  v2.1.0
+=========================
+Phase 2 — Knowledge Graph Population
+
+CHANGES FROM v2.0.0:
+  - Imports schema from shared_schema.py instead of defining its own.
+    This eliminates the mismatch where reader and KG had different
+    entities table structures.
+
+  - entities table is now the KG-canonical format:
+      entity_id = "method::long short-term memory"
+      canonical_text, raw_variants (JSON), papers_seen_in (JSON)
+    Reader no longer writes to entities directly — it calls kg_population
+    via subprocess, which owns entity writes.
+
+  - papers table now has all reader columns (doi, source_path, n_claims,
+    etc.) via shared_schema. KG writes only its own fields (paper_id,
+    title, authors, year, venue, doi, abstract) using INSERT OR IGNORE so
+    it never overwrites reader's richer fields.
+
+  - session_log INSERT now includes detail column (KG logs go here) and
+    leaves input_summary/output_summary empty (reader's fields).
+
+Usage (unchanged):
+  python kg_population/kg_population.py \\
+      --inputs memory/paper1/claims_output.json \\
+      --db shared_memory/research.db \\
+      --gexf shared_memory/knowledge_graph.gexf \\
+      --ollama-host https://<ngrok>.ngrok-free.app
+"""
+
 import argparse
 import json
 import os
 import re
 import requests
-import time
-import sqlite3
 import string
 import unicodedata
 from pathlib import Path
 from typing import Optional
+import sqlite3
 
 import networkx as nx
 
+# Import unified schema — single source of truth
+import sys
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _SCRIPT_DIR.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
-# ---------------------------------------------------------------------------
-# Normalisation (Tier-1 exact match -- always runs)
-# ---------------------------------------------------------------------------
+from shared_schema import FULL_SCHEMA, ensure_schema, EDGE_TYPE_MAP
+
+
+# ─────────────────────────────────────────────────────────────
+#  NORMALISATION (Tier-1)
+# ─────────────────────────────────────────────────────────────
 
 _PUNCT_TABLE = str.maketrans("", "", string.punctuation.replace("-", ""))
 
 
 def normalize_entity_text(raw: str) -> str:
     """
-    Tier-1 normalisation: unicode NFC -> lowercase -> strip punctuation
-    (keep hyphens) -> collapse whitespace.
-    Returns the canonical lookup key.
+    Tier-1 normalisation: unicode NFC → lowercase → strip punctuation
+    (keep hyphens) → collapse whitespace.
+    Returns the canonical lookup key used in entity_id.
     """
     text = unicodedata.normalize("NFC", raw)
     text = text.lower()
@@ -33,9 +73,9 @@ def normalize_entity_text(raw: str) -> str:
     return text
 
 
-# ---------------------------------------------------------------------------
-# LLM-based entity clustering (Tier-2 -- runs once before ingestion)
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────
+#  LLM ENTITY CLUSTERING (Tier-2, Ollama)
+# ─────────────────────────────────────────────────────────────
 
 CLUSTER_PROMPT = """You are a scientific entity deduplication assistant for NLP/ML research papers.
 
@@ -45,15 +85,15 @@ Your job is to group ONLY TRUE SYNONYMS and SURFACE VARIANTS of the same concept
 STRICT RULES:
 - ONLY merge if the strings refer to the exact same real-world concept/method/dataset.
 - DO NOT merge concepts that are intentionally distinct:
-    "Transformer" vs "4-layer Transformer" vs "Transformer (big)" -> KEEP SEPARATE (different model sizes)
-    "self-attention" vs "Self-Attention (restricted)" -> KEEP SEPARATE (different mechanisms)
-    "LSTM" vs "ConvLSTM" -> KEEP SEPARATE (different architectures)
-    "machine translation" vs "machine translation tasks" -> KEEP SEPARATE (task vs task group)
+    "Transformer" vs "4-layer Transformer" vs "Transformer (big)" -> KEEP SEPARATE
+    "self-attention" vs "Self-Attention (restricted)" -> KEEP SEPARATE
+    "LSTM" vs "ConvLSTM" -> KEEP SEPARATE
+    "machine translation" vs "machine translation tasks" -> KEEP SEPARATE
 - DO merge only obvious abbreviation expansions and trivial surface variants:
     "LSTM", "Long Short-Term Memory", "Long Short-Term Memory (LSTM) networks" -> MERGE
     "RNNs", "Recurrent Neural Networks", "Recurrent Neural Network" -> MERGE
     "BLEU", "BLEU score" -> MERGE
-    "perplexity", "evaluation perplexity" -> MERGE (same metric, one is more specific label)
+    "perplexity", "evaluation perplexity" -> MERGE
 - Choose the MOST DESCRIPTIVE and COMPLETE form as the canonical name.
 - If unsure whether to merge, DO NOT merge. Keeping them separate is safer.
 
@@ -72,116 +112,76 @@ Example format:
 No explanation, no markdown, just the JSON object."""
 
 
-def _call_llm_with_retry(
-    url: str,
-    payload: dict,
-    max_retries: int = 6,
-) -> str:
-    """
-    Call the Gemini API with exponential backoff on 429 rate limit errors.
-    Returns the raw text response. Raises on non-retryable errors.
-    """
-    import time
-    wait = 30  # start with 30s wait -- free tier needs more breathing room
-    for attempt in range(max_retries):
-        resp = requests.post(url, json=payload, timeout=60)
-        if resp.status_code == 429:
-            print(f"[LLM Cluster] Rate limited. Waiting {wait}s before retry "
-                  f"(attempt {attempt + 1}/{max_retries})...")
-            time.sleep(wait)
-            wait = min(wait * 2, 120)  # exponential backoff, cap at 2 min
-            continue
+def _call_ollama(prompt: str, ollama_host: str, model: str = "qwen2.5") -> str:
+    url = f"{ollama_host}/api/generate"
+    payload = {
+        "model":  model,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.0, "num_predict": 4096},
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "ngrok-skip-browser-warning": "true",
+    }
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=300)
         resp.raise_for_status()
-        return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-    raise RuntimeError(f"LLM API still rate limited after {max_retries} retries.")
+        return resp.json().get("response", "").strip()
+    except Exception as e:
+        print(f"[Ollama] Error: {e}")
+        return "{}"
 
 
 def llm_cluster_entities(
-    entity_type: str,
+    entity_type:    str,
     entity_strings: list[str],
-    api_key: str,
-    model: str = "gemini-2.5-flash",
-    batch_size: int = 50,
+    ollama_host:    str,
+    model:          str = "qwen2.5",
+    batch_size:     int = 40,
 ) -> dict[str, str]:
-    """
-    Send entity strings to the LLM in batches and get back a merge map:
-    {raw_string -> canonical_string}
-
-    Batches of batch_size (default 50) to stay within token limits and
-    avoid rate limits. Includes exponential backoff retry on 429 errors.
-    Falls back to identity map (no merging) on unrecoverable errors.
-    """
-    import time
-
-    if not entity_strings or not api_key:
+    if not entity_strings or not ollama_host:
         return {s: s for s in entity_strings}
 
-    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{model}:generateContent?key={api_key}")
-
     merged: dict[str, str] = {}
-
-    # Split into batches of batch_size
-    batches = [entity_strings[i:i+batch_size]
-               for i in range(0, len(entity_strings), batch_size)]
+    batches = [
+        entity_strings[i:i + batch_size]
+        for i in range(0, len(entity_strings), batch_size)
+    ]
 
     for batch_idx, batch in enumerate(batches):
-        if len(batches) > 1:
-            print(f"[LLM Cluster]   Batch {batch_idx+1}/{len(batches)} "
-                  f"({len(batch)} entities)...")
-
-        entity_list = "\n".join(f"{i+1}. {s}" for i, s in enumerate(batch))
+        print(f"[Ollama Cluster] Batch {batch_idx+1}/{len(batches)} ({len(batch)} entities)...")
         prompt = CLUSTER_PROMPT.format(
             entity_type=entity_type,
-            entity_list=entity_list,
+            entity_list="\n".join(f"{i+1}. {s}" for i, s in enumerate(batch)),
         )
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.0,
-                "maxOutputTokens": 4096,
-            },
-        }
-
+        raw = _call_ollama(prompt, ollama_host, model)
         try:
-            raw = _call_llm_with_retry(url, payload)
-
-            # Strip markdown code fences if present
-            raw = re.sub(r"^```json\s*", "", raw.strip())
-            raw = re.sub(r"```$", "", raw.strip())
-
-            batch_map = json.loads(raw)
-
-            # Validate: every input in this batch must be present
+            raw_clean = re.sub(r"^```json\s*", "", raw.strip())
+            raw_clean = re.sub(r"```$", "", raw_clean.strip())
+            batch_map = json.loads(raw_clean)
             for s in batch:
                 if s not in batch_map:
                     batch_map[s] = s
-
             merged.update(batch_map)
-
         except Exception as e:
-            print(f"[LLM Cluster] Warning: batch {batch_idx+1} failed: {e}")
-            print("[LLM Cluster] Using identity map for this batch.")
+            print(f"[Ollama Cluster] Batch {batch_idx+1} parse failed ({e}) — identity fallback")
             for s in batch:
                 merged[s] = s
-
-        # Small delay between batches to be polite to the API
-        if batch_idx < len(batches) - 1:
-            time.sleep(15)  # 15s between batches for free tier
 
     return merged
 
 
 def build_merge_maps(
-    json_paths: list[str],
-    api_key: Optional[str],
+    json_paths:  list[str],
+    ollama_host: Optional[str],
 ) -> dict[str, dict[str, str]]:
     """
-    Step 1: Collect all unique entity strings per type across all input papers.
-    Step 2: Call LLM once per entity type to get canonical groupings.
-    Returns: {entity_type: {raw_string -> canonical_string}}
+    Collect all unique entity strings per type across all papers,
+    then cluster via LLM once per type.
+    Returns {entity_type: {raw_string -> canonical_string}}.
     """
-    # Collect all unique raw strings per type
     all_entities: dict[str, set[str]] = {
         "method": set(), "dataset": set(), "metric": set(), "task": set()
     }
@@ -197,20 +197,18 @@ def build_merge_maps(
                 best = max(mentions, key=lambda m: m.get("confidence", 0))
                 all_entities[etype].add(best.get("text", raw_key))
 
-    # Call LLM per type
     merge_maps: dict[str, dict[str, str]] = {}
     for etype, strings in all_entities.items():
-        string_list = sorted(strings)  # sorted for determinism
+        string_list = sorted(strings)
         if not string_list:
             merge_maps[etype] = {}
             continue
 
         print(f"[LLM Cluster] Clustering {len(string_list)} {etype} entities...")
-        merge_map = llm_cluster_entities(etype, string_list, api_key)
+        merge_map = llm_cluster_entities(etype, string_list, ollama_host)
 
-        # Log what got merged
         merged_count = sum(1 for k, v in merge_map.items() if k != v)
-        print(f"[LLM Cluster] {etype}: {merged_count} entities will be merged into canonical forms")
+        print(f"[LLM Cluster] {etype}: {merged_count} entities merged into canonical forms")
         for k, v in sorted(merge_map.items()):
             if k != v:
                 print(f"  '{k}' -> '{v}'")
@@ -220,126 +218,20 @@ def build_merge_maps(
     return merge_maps
 
 
-# ---------------------------------------------------------------------------
-# SQLite schema
-# ---------------------------------------------------------------------------
-
-SCHEMA_SQL = """
--- Papers
-CREATE TABLE IF NOT EXISTS papers (
-    paper_id    TEXT PRIMARY KEY,
-    title       TEXT,
-    authors     TEXT,
-    year        INTEGER,
-    venue       TEXT,
-    doi         TEXT,
-    abstract    TEXT
-);
-
--- Canonical entities
--- entity_id format: "{entity_type}::{canonical_key}"
--- raw_variants: all raw strings that mapped here (for "also referred to as...")
--- papers_seen_in: which papers mention this entity
-CREATE TABLE IF NOT EXISTS entities (
-    entity_id       TEXT PRIMARY KEY,
-    entity_type     TEXT NOT NULL,
-    canonical_text  TEXT NOT NULL,
-    raw_variants    TEXT,
-    papers_seen_in  TEXT
-);
-
--- Paper to entity typed edges
-CREATE TABLE IF NOT EXISTS paper_entity_relationships (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    paper_id    TEXT NOT NULL,
-    entity_id   TEXT NOT NULL,
-    edge_type   TEXT NOT NULL,
-    section     TEXT,
-    confidence  REAL,
-    UNIQUE(paper_id, entity_id, edge_type)
-);
-
--- Limitation statements (things paper admits it cannot do)
--- Graph node_type: LimitationStatement | edge: has_limitation
-CREATE TABLE IF NOT EXISTS limitation_statements (
-    stmt_id           TEXT PRIMARY KEY,
-    paper_id          TEXT NOT NULL,
-    text              TEXT NOT NULL,
-    section           TEXT,
-    confidence        REAL,
-    entities_involved TEXT
-);
-
--- Future work statements (things authors plan to do)
--- Graph node_type: FutureWork | edge: has_future_work
--- Kept separate: Gap Detector (Phase 6) queries these as direct gap signals
-CREATE TABLE IF NOT EXISTS future_work_statements (
-    stmt_id           TEXT PRIMARY KEY,
-    paper_id          TEXT NOT NULL,
-    text              TEXT NOT NULL,
-    section           TEXT,
-    confidence        REAL,
-    entities_involved TEXT
-);
-
--- Claims (performance/comparative/methodological)
--- Not graph nodes yet -- Comparator Agent (Phase 4) adds contradiction edges
-CREATE TABLE IF NOT EXISTS claims (
-    claim_id          TEXT PRIMARY KEY,
-    paper_id          TEXT NOT NULL,
-    claim_type        TEXT,
-    description       TEXT,
-    value             TEXT,
-    confidence        REAL,
-    section           TEXT,
-    entities_involved TEXT
-);
-
--- Session / action log
-CREATE TABLE IF NOT EXISTS session_log (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id     TEXT NOT NULL DEFAULT 'default', -- Added default to avoid null errors
-    timestamp      TEXT DEFAULT (datetime('now')),
-    agent          TEXT,
-    action         TEXT,
-    detail         TEXT,
-    input_summary  TEXT DEFAULT '',                 -- Fixed: Permanent column
-    output_summary TEXT DEFAULT '',                 -- Fixed: Permanent column
-    confidence     REAL DEFAULT 1.0, 
-    duration_ms    INTEGER DEFAULT 0 
-);
-"""
-
-EDGE_TYPE_MAP = {
-    "method":  "uses",
-    "dataset": "evaluates_on",
-    "metric":  "measures_with",
-    "task":    "addresses",
-}
-
-
-# ---------------------------------------------------------------------------
-# Main builder class
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────
+#  KNOWLEDGE GRAPH BUILDER
+# ─────────────────────────────────────────────────────────────
 
 class KnowledgeGraphBuilder:
-    """
-    Reads Phase-1 paper JSONs and populates SQLite + NetworkX graph.
-
-    Call build_merge_maps() first to get LLM-based entity clusters,
-    then pass them into the constructor. If no merge_maps provided,
-    falls back to Tier-1 exact match only.
-    """
 
     def __init__(
         self,
-        db_path: str = "shared_memory/research.db",
-        gexf_path: str = "shared_memory/knowledge_graph.gexf",
+        db_path:    str = "shared_memory/research.db",
+        gexf_path:  str = "shared_memory/knowledge_graph.gexf",
         merge_maps: Optional[dict] = None,
     ):
-        self.db_path = Path(db_path)
+        self.db_path   = Path(db_path)
         self.gexf_path = Path(gexf_path)
-        # merge_maps: {entity_type: {raw_text -> canonical_text}}
         self.merge_maps = merge_maps or {}
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -347,7 +239,11 @@ class KnowledgeGraphBuilder:
 
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
-        self._init_schema()
+
+        # ── USE UNIFIED SCHEMA ───────────────────────────────
+        # This is the only place the schema is created/migrated.
+        # Both reader_agent.py and kg_population.py call this same function.
+        ensure_schema(self.conn)
 
         if self.gexf_path.exists():
             self.graph = nx.read_gexf(str(self.gexf_path))
@@ -358,51 +254,49 @@ class KnowledgeGraphBuilder:
             self.graph = nx.DiGraph()
             self._log("KGBuilder", "init_graph", "Created new empty graph")
 
-        # In-memory canonical key set for fast exact-match lookup
+        # In-memory cache of canonical keys already in entities table
         self._entity_key_cache: dict[str, set[str]] = {
             t: set() for t in ("method", "dataset", "metric", "task")
         }
         self._warm_cache()
 
-    def _init_schema(self):
-        self.conn.executescript(SCHEMA_SQL)
-        self.conn.commit()
-
-    def _warm_cache(self):
+    def _warm_cache(self) -> None:
+        """Load all existing entity_ids from DB into memory for fast lookup."""
         cur = self.conn.execute("SELECT entity_id, entity_type FROM entities")
         for row in cur:
             etype = row["entity_type"]
-            ckey = row["entity_id"].split("::", 1)[1]
+            # entity_id format: "method::long short-term memory"
+            ckey = row["entity_id"].split("::", 1)[1] if "::" in row["entity_id"] else row["entity_id"]
             if etype in self._entity_key_cache:
                 self._entity_key_cache[etype].add(ckey)
 
-    def _log(self, agent: str, action: str, detail: str, input_sum: str = "", output_sum: str = ""):
+    def _log(self, agent: str, action: str, detail: str,
+             input_sum: str = "", output_sum: str = "") -> None:
         self.conn.execute(
-            """INSERT INTO session_log 
-               (session_id, agent, action, detail, input_summary, output_summary) 
+            """INSERT INTO session_log
+               (session_id, agent, action, detail, input_summary, output_summary)
                VALUES (?,?,?,?,?,?)""",
             ("kg_builder_session", agent, action, detail, input_sum, output_sum),
         )
         self.conn.commit()
         print(f"[{agent}] {action}: {detail}")
 
-    # -------------------------------------------------------------------------
+    # ── Main ingestion ────────────────────────────────────────
 
     def ingest_paper(self, json_path: str) -> str:
-        """
-        Load one Phase-1 claims_output JSON and populate everything.
-        merge_maps must be pre-built before calling this.
-        """
         with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
 
         paper_id = data["paper_id"]
         self._log("KGBuilder", "ingest_start", f"paper_id={paper_id}")
 
-        # Step 1: Paper metadata
         meta = data.get("metadata", {})
+
+        # ── Step 1: Paper metadata ────────────────────────────
+        # INSERT OR IGNORE so we never overwrite reader's richer fields
+        # (source_path, n_claims, coverage_gain, action, etc.)
         self.conn.execute(
-            """INSERT OR REPLACE INTO papers
+            """INSERT OR IGNORE INTO papers
                (paper_id, title, authors, year, venue, doi, abstract)
                VALUES (?,?,?,?,?,?,?)""",
             (
@@ -426,34 +320,35 @@ class KnowledgeGraphBuilder:
                 venue=meta.get("venue", ""),
             )
 
-        # Steps 2 & 3: Entities + typed edges
+        # ── Steps 2 & 3: Entities + typed edges ───────────────
         entity_index = data.get("entity_index", {})
         for etype, entities_dict in entity_index.items():
             if etype not in EDGE_TYPE_MAP:
                 continue
             edge_label = EDGE_TYPE_MAP[etype]
+
             for raw_key, mentions in entities_dict.items():
                 best_mention = max(mentions, key=lambda m: m.get("confidence", 0))
-                raw_text = best_mention.get("text", raw_key)
+                raw_text     = best_mention.get("text", raw_key)
 
                 # Apply LLM merge map if available
                 canonical_text = self.merge_maps.get(etype, {}).get(raw_text, raw_text)
 
                 entity_id = self._resolve_entity(
-                    raw_text=raw_text,
-                    canonical_text=canonical_text,
-                    entity_type=etype,
-                    paper_id=paper_id,
+                    raw_text       = raw_text,
+                    canonical_text = canonical_text,
+                    entity_type    = etype,
+                    paper_id       = paper_id,
                 )
                 self._add_paper_entity_edge(
-                    paper_id=paper_id,
-                    entity_id=entity_id,
-                    edge_type=edge_label,
-                    section=best_mention.get("section_heading", ""),
-                    confidence=best_mention.get("confidence", 1.0),
+                    paper_id   = paper_id,
+                    entity_id  = entity_id,
+                    edge_type  = edge_label,
+                    section    = best_mention.get("section_heading", ""),
+                    confidence = best_mention.get("confidence", 1.0),
                 )
 
-        # Step 4a: Limitation statements
+        # ── Step 4a: Limitation statements ───────────────────
         for idx, lim in enumerate(data.get("limitations", [])):
             stmt_id = f"{paper_id}::lim::{idx}"
             self.conn.execute(
@@ -474,7 +369,7 @@ class KnowledgeGraphBuilder:
             if not self.graph.has_edge(paper_id, stmt_id):
                 self.graph.add_edge(paper_id, stmt_id, edge_type="has_limitation")
 
-        # Step 4b: Future work statements
+        # ── Step 4b: Future work statements ──────────────────
         for idx, fw in enumerate(data.get("future_work", [])):
             stmt_id = f"{paper_id}::fw::{idx}"
             self.conn.execute(
@@ -495,7 +390,7 @@ class KnowledgeGraphBuilder:
             if not self.graph.has_edge(paper_id, stmt_id):
                 self.graph.add_edge(paper_id, stmt_id, edge_type="has_future_work")
 
-        # Step 4c: Claims
+        # ── Step 4c: Claims ───────────────────────────────────
         for idx, claim in enumerate(data.get("claims", [])):
             claim_id = f"{paper_id}::claim::{idx}"
             self.conn.execute(
@@ -518,43 +413,46 @@ class KnowledgeGraphBuilder:
         summary = data.get("summary", {})
         self._log(
             "KGBuilder", "ingest_done",
-            f"paper_id={paper_id} | entities={summary.get('total_llm_entities','?')} "
-            f"| claims={summary.get('total_claims','?')} "
-            f"| limitations={summary.get('total_limitations','?')} "
-            f"| future_work={summary.get('total_future_work','?')}",
+            f"paper_id={paper_id} | "
+            f"entities={summary.get('total_llm_entities','?')} | "
+            f"claims={summary.get('total_claims','?')} | "
+            f"limitations={summary.get('total_limitations','?')} | "
+            f"future_work={summary.get('total_future_work','?')}",
         )
         return paper_id
 
-    # -------------------------------------------------------------------------
+    # ── Entity resolution ─────────────────────────────────────
 
     def _resolve_entity(
         self,
-        raw_text: str,
+        raw_text:       str,
         canonical_text: str,
-        entity_type: str,
-        paper_id: str,
+        entity_type:    str,
+        paper_id:       str,
     ) -> str:
         """
-        Map raw_text to a canonical entity_id using the pre-built canonical_text.
-        canonical_text comes from the LLM merge map (or equals raw_text if no merge).
+        Map raw_text to a canonical entity_id.
         entity_id = "{entity_type}::{normalize(canonical_text)}"
+
+        If the entity already exists, just add this raw_text as a variant
+        and add paper_id to papers_seen_in. Otherwise create new entity.
         """
         canonical_key = normalize_entity_text(canonical_text)
-        entity_id = f"{entity_type}::{canonical_key}"
+        entity_id     = f"{entity_type}::{canonical_key}"
 
         if canonical_key in self._entity_key_cache.get(entity_type, set()):
-            # Entity already exists -- just add this raw variant
             self._update_entity_variants(entity_id, raw_text, paper_id)
             return entity_id
 
-        # New entity
+        # New canonical entity
         self.conn.execute(
             """INSERT INTO entities
                (entity_id, entity_type, canonical_text, raw_variants, papers_seen_in)
                VALUES (?,?,?,?,?)""",
             (
-                entity_id, entity_type,
-                canonical_text,          # LLM-chosen display form
+                entity_id,
+                entity_type,
+                canonical_text,
                 json.dumps([raw_text]),
                 json.dumps([paper_id]),
             ),
@@ -566,11 +464,13 @@ class KnowledgeGraphBuilder:
             self.graph.add_node(
                 entity_id,
                 node_type=entity_type.capitalize(),
-                label=canonical_text,    # use canonical as display label
+                label=canonical_text,
             )
         return entity_id
 
-    def _update_entity_variants(self, entity_id: str, raw_text: str, paper_id: str):
+    def _update_entity_variants(
+        self, entity_id: str, raw_text: str, paper_id: str
+    ) -> None:
         row = self.conn.execute(
             "SELECT raw_variants, papers_seen_in FROM entities WHERE entity_id=?",
             (entity_id,),
@@ -589,7 +489,14 @@ class KnowledgeGraphBuilder:
         )
         self.conn.commit()
 
-    def _add_paper_entity_edge(self, paper_id, entity_id, edge_type, section="", confidence=1.0):
+    def _add_paper_entity_edge(
+        self,
+        paper_id:   str,
+        entity_id:  str,
+        edge_type:  str,
+        section:    str   = "",
+        confidence: float = 1.0,
+    ) -> None:
         self.conn.execute(
             """INSERT OR IGNORE INTO paper_entity_relationships
                (paper_id, entity_id, edge_type, section, confidence)
@@ -599,21 +506,23 @@ class KnowledgeGraphBuilder:
         self.conn.commit()
         if not self.graph.has_edge(paper_id, entity_id):
             self.graph.add_edge(paper_id, entity_id,
-                                edge_type=edge_type, section=section, confidence=confidence)
+                                edge_type=edge_type,
+                                section=section,
+                                confidence=confidence)
 
-    def save_gexf(self):
+    # ── Graph I/O ─────────────────────────────────────────────
+
+    def save_gexf(self) -> None:
         nx.write_gexf(self.graph, str(self.gexf_path))
         self._log("KGBuilder", "save_gexf",
                   f"Saved {self.graph.number_of_nodes()} nodes, "
-                  f"{self.graph.number_of_edges()} edges -> {self.gexf_path}")
+                  f"{self.graph.number_of_edges()} edges → {self.gexf_path}")
 
-    def close(self):
+    def close(self) -> None:
         self.save_gexf()
         self.conn.close()
 
-    # -------------------------------------------------------------------------
-    # Query helpers
-    # -------------------------------------------------------------------------
+    # ── Query helpers (for downstream agents) ─────────────────
 
     def papers_using_method(self, method_text: str) -> list:
         entity_id = f"method::{normalize_entity_text(method_text)}"
@@ -638,63 +547,67 @@ class KnowledgeGraphBuilder:
         return [dict(row) for row in cur]
 
     def get_graph_summary(self) -> dict:
-        node_counts = {}
+        node_counts: dict[str, int] = {}
         for ntype in ("Paper", "Method", "Dataset", "Metric", "Task",
                       "LimitationStatement", "FutureWork"):
             node_counts[ntype] = sum(
                 1 for _, d in self.graph.nodes(data=True)
                 if d.get("node_type") == ntype
             )
-        edge_counts: dict = {}
+        edge_counts: dict[str, int] = {}
         for _, _, d in self.graph.edges(data=True):
             et = d.get("edge_type", "unknown")
             edge_counts[et] = edge_counts.get(et, 0) + 1
         return {"node_counts": node_counts, "edge_counts": edge_counts}
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────
+#  CLI
+# ─────────────────────────────────────────────────────────────
 
-def main():
-    parser = argparse.ArgumentParser(description="Phase 2 -- Knowledge Graph Population")
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Phase 2 — Knowledge Graph Population v2.1.0"
+    )
     parser.add_argument("--inputs", nargs="+", required=True,
-                        help="Paths to Phase-1 claims_output JSON files")
+                        help="Paths to Phase-1 claims_output.json files")
     parser.add_argument("--db",   default="shared_memory/research.db")
     parser.add_argument("--gexf", default="shared_memory/knowledge_graph.gexf")
-    parser.add_argument("--api-key", default=None,
-                        help="Gemini API key for LLM entity clustering. "
-                             "Can also set GEMINI_API_KEY env variable.")
+    parser.add_argument("--ollama-host",
+                        default=os.environ.get("OLLAMA_HOST", ""),
+                        help="Ollama host URL for entity clustering (optional)")
     args = parser.parse_args()
 
-    api_key = args.api_key or os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print("[Warning] No API key provided. Running without LLM clustering (exact match only).")
+    ollama_host = args.ollama_host or os.environ.get("OLLAMA_HOST", "")
+    if not ollama_host:
+        print("[Warning] No --ollama-host provided. Using Tier-1 exact match only.")
+    else:
+        print(f"[KGBuilder] Ollama host: {ollama_host}")
 
-    # Step 1: LLM clustering across all papers BEFORE ingestion
-    merge_maps = build_merge_maps(args.inputs, api_key)
+    # Step 1: Build merge maps via LLM clustering
+    merge_maps = build_merge_maps(args.inputs, ollama_host)
 
-    # Step 2: Ingest each paper using the merge maps
+    # Step 2: Ingest all papers
     builder = KnowledgeGraphBuilder(
-        db_path=args.db,
-        gexf_path=args.gexf,
-        merge_maps=merge_maps,
+        db_path    = args.db,
+        gexf_path  = args.gexf,
+        merge_maps = merge_maps,
     )
 
     for json_file in args.inputs:
         builder.ingest_paper(json_file)
 
     summary = builder.get_graph_summary()
-    print("\n-- Node counts --")
+    print("\n── Node counts ──────────────────")
     for k, v in summary["node_counts"].items():
         print(f"  {k:25s}: {v}")
-    print("\n-- Edge counts --")
+    print("\n── Edge counts ──────────────────")
     for k, v in summary["edge_counts"].items():
         print(f"  {k:25s}: {v}")
 
     builder.close()
-    print(f"\n  DB   -> {args.db}")
-    print(f"  GEXF -> {args.gexf}")
+    print(f"\n  DB   → {args.db}")
+    print(f"  GEXF → {args.gexf}")
 
 
 if __name__ == "__main__":

@@ -93,10 +93,13 @@ DB_PATH       = SHARED_MEMORY / "research.db"
 GEXF_PATH     = SHARED_MEMORY / "knowledge_graph.gexf"
 OUTPUT_DIR    = pathlib.Path("data_1/agent_outputs/comparisons")
 
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta"
-    "/models/gemini-2.5-flash:generateContent"
-)
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_MODEL = "qwen2.5" # Or your preferred model
+
+# GEMINI_URL = (
+#     "https://generativelanguage.googleapis.com/v1beta"
+#     "/models/gemini-2.5-flash:generateContent"
+# )
 
 MIN_OVERLAP_THRESHOLD    = 0.01
 METRIC_DIFF_THRESHOLD    = 0.02
@@ -1007,30 +1010,30 @@ class ProgrammaticExtractor:
 #  LAYER 2 — LLM
 # ─────────────────────────────────────────────────────────────
 
-def _call_gemini_raw(prompt: str) -> str:
-    key = os.environ.get("GEMINI_API_KEY", "")
-    if not key:
-        raise EnvironmentError("GEMINI_API_KEY not set in .env")
-    last_err = None
-    for attempt in range(1, LLM_MAX_RETRIES + 1):
-        try:
-            resp = requests.post(
-                f"{GEMINI_URL}?key={key}",
-                json={"contents": [{"parts": [{"text": prompt}]}],
-                      "generationConfig": {"temperature": 0.1, "maxOutputTokens": 4096}},
-                timeout=LLM_TIMEOUT_SECONDS,
-            )
-            if resp.status_code == 429:
-                if attempt < LLM_MAX_RETRIES:
-                    time.sleep(LLM_RETRY_BASE_DELAY * (2 ** (attempt - 1))); continue
-                raise RuntimeError("Rate limited (429)")
-            resp.raise_for_status()
-            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        except (requests.RequestException, KeyError, IndexError) as e:
-            last_err = e
-            if attempt < LLM_MAX_RETRIES:
-                time.sleep(LLM_RETRY_BASE_DELAY * (2 ** (attempt - 1)))
-    raise RuntimeError(f"Gemini failed: {last_err}")
+def _call_ollama_raw(prompt: str) -> str:
+    """Call Ollama /api/generate with JSON constraint."""
+    url = f"{OLLAMA_HOST}/api/generate"
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",  # Forces valid JSON output
+        "options": {
+            "temperature": 0.1,
+            "num_predict": 4096,
+        },
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "ngrok-skip-browser-warning": "true",
+    }
+    
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=120)
+        resp.raise_for_status()
+        return resp.json().get("response", "").strip()
+    except Exception as e:
+        raise RuntimeError(f"Ollama comparison failed: {e}")
 
 
 def _parse_llm_json(text: str) -> dict:
@@ -1493,9 +1496,8 @@ class ComparatorAgent:
                        signals["shared_datasets"]       or
                        signals["agreements"])
 
-        if self.llm_backend == "gemini" and has_signals:
-            print("  [WAIT] Avoiding 429 Limit. Cooling down for 5s...")
-            time.sleep(5)
+        # --- UPDATED TO OLLAMA ---
+        if self.llm_backend == "ollama":
             self._act(f"llm_enrich(): {pid_a} ↔ {pid_b}")
             limited = {
                 **signals,
@@ -1508,12 +1510,14 @@ class ComparatorAgent:
                     paper_a, paper_b, limited,
                     setup_a, setup_b, div, pid_a, pid_b,
                 )
-                text     = _call_gemini_raw(prompt)
+                # Call your new Ollama function
+                text     = _call_ollama_raw(prompt) 
                 llm_resp = _parse_llm_json(text)
                 apply_llm_enrichment(result, limited, llm_resp, self.verbose)
                 self._observe(f"LLM done. overall={result.overall_relationship}")
             except Exception as e:
                 self._observe(f"LLM failed ({e}) — keeping heuristic results.")
+        # -------------------------
 
         if not result.llm_used:
             if result.contradictions:
@@ -1551,7 +1555,7 @@ class ComparatorAgent:
             "n_complements_found":        self._n_complements,
             "n_neutral":                  self._n_neutral,
             "method_space_coverage":      round(coverage, 3),
-            "llm_used":                   self.llm_backend == "gemini",
+            "llm_used":                   self.llm_backend == "ollama",
             "elapsed_seconds":            round(elapsed, 1),
             "react_trace":                self.trace,
             "rl_note": (
@@ -1641,9 +1645,7 @@ def main() -> None:
     MEMORY_DIR            = pathlib.Path(args.memory_dir)
     MAX_PAIRS_PER_SESSION = args.max_pairs
 
-    backend = "none" if args.no_llm else (
-        "gemini" if os.environ.get("GEMINI_API_KEY") else "none"
-    )
+    backend = "none" if args.no_llm else "ollama"
 
     if args.verbose:
         print(f"\nComparator Agent v{ComparatorAgent.VERSION}")

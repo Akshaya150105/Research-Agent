@@ -88,7 +88,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from entity_resolver import get_typed_entities
 
 # ── defaults ──────────────────────────────────────────────────
-PAPERS_DIR              = pathlib.Path("data_1/papers")
+PAPERS_DIR              = pathlib.Path("Data")
 MEMORY_DIR              = pathlib.Path("memory")
 SHARED_MEMORY           = pathlib.Path("shared_memory")
 DB_PATH                 = SHARED_MEMORY / "research.db"
@@ -139,64 +139,18 @@ class ReaderReport:
 
 
 # ─────────────────────────────────────────────────────────────
-#  DB SCHEMA
+#  DB SCHEMA — single source of truth in shared_schema.py
+#
+#  The reader used to define its own entities table with:
+#    entity_id (UUID PK), paper_id (FK), text, text_norm, entity_type...
+#  KG used its own entities table with:
+#    entity_id ("method::lstm"), entity_type, canonical_text, raw_variants...
+#
+#  When both ran on the same DB they always crashed on each other's schema.
+#  Fix: import ensure_schema from shared_schema — one unified schema for both.
 # ─────────────────────────────────────────────────────────────
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS papers (
-    paper_id      TEXT PRIMARY KEY,
-    title         TEXT DEFAULT '',
-    authors       TEXT DEFAULT '[]',
-    year          INTEGER,
-    venue         TEXT DEFAULT '',
-    abstract      TEXT DEFAULT '',
-    source_path   TEXT DEFAULT '',
-    n_claims      INTEGER DEFAULT 0,
-    n_entities    INTEGER DEFAULT 0,
-    n_limitations INTEGER DEFAULT 0,
-    coverage_gain REAL DEFAULT 0.0,
-    action        TEXT DEFAULT 'read',
-    processed_at  TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS entities (
-    entity_id    TEXT PRIMARY KEY,
-    paper_id     TEXT NOT NULL,
-    text         TEXT NOT NULL,
-    text_norm    TEXT NOT NULL,
-    entity_type  TEXT NOT NULL,
-    section_type TEXT DEFAULT '',
-    confidence   REAL DEFAULT 1.0,
-    source       TEXT DEFAULT 'llm',
-    FOREIGN KEY (paper_id) REFERENCES papers(paper_id)
-);
-
-CREATE TABLE IF NOT EXISTS session_log (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id     TEXT NOT NULL,
-    timestamp      TEXT NOT NULL,
-    agent          TEXT NOT NULL,
-    action         TEXT NOT NULL,
-    input_summary  TEXT DEFAULT '',
-    output_summary TEXT DEFAULT '',
-    confidence     REAL DEFAULT 1.0,
-    duration_ms    INTEGER DEFAULT 0
-);
-"""
-
-
-def _ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(_SCHEMA)
-    for alter in [
-        "ALTER TABLE entities ADD COLUMN text_norm TEXT DEFAULT ''",
-        "ALTER TABLE session_log ADD COLUMN input_summary TEXT DEFAULT ''",
-        "ALTER TABLE session_log ADD COLUMN output_summary TEXT DEFAULT ''",
-    ]:
-        try:
-            conn.execute(alter)
-        except Exception:
-            pass
-    conn.commit()
+from shared_schema import ensure_schema as _ensure_schema
 
 
 # ─────────────────────────────────────────────────────────────
@@ -373,21 +327,27 @@ class ExtractionPipeline:
                 return False
 
         # ── Step 4: KG Population ─────────────────────────────
-        # Always run this — it's idempotent (INSERT OR IGNORE/REPLACE)
-        # and ensures the graph reflects the latest claims_output.json.
-        if self.db_path.exists() or True:   # always attempt
-            ok = self._run_cmd(
-                [
-                    sys.executable, "kg_population/kg_population.py",
-                    "--inputs",  str(self.claims_output_json),
-                    "--db",      str(self.db_path),
-                    "--gexf",    str(self.gexf_path),
-                ],
-                step_name="kg",
-            )
-            # KG failure is non-fatal — claims_output.json still usable
-            if not ok and self.verbose:
-                print("    [pipeline:kg] ⚠ KG population failed — continuing anyway")
+        # Always run — idempotent (INSERT OR IGNORE/REPLACE).
+        # Pass --ollama-host so KG can also do LLM entity clustering.
+        # KG failure is non-fatal — claims_output.json is still usable
+        # and the reader can still do coverage_gain + papers table write.
+        kg_script = _PROJECT_ROOT / "kg_population" / "kg_population.py"
+        if not kg_script.exists():
+            # Try alternate location (project root level)
+            kg_script = _PROJECT_ROOT / "kg_population.py"
+
+        kg_cmd = [
+            sys.executable, str(kg_script),
+            "--inputs",  str(self.claims_output_json),
+            "--db",      str(self.db_path),
+            "--gexf",    str(self.gexf_path),
+        ]
+        if self.ollama_host:
+            kg_cmd += ["--ollama-host", self.ollama_host]
+
+        ok = self._run_cmd(kg_cmd, step_name="kg")
+        if not ok and self.verbose:
+            print("    [pipeline:kg] ⚠ KG population failed — continuing anyway")
 
         return self.claims_output_json.exists()
 
@@ -403,15 +363,53 @@ def _already_processed(paper_id: str, conn: sqlite3.Connection) -> bool:
 
 
 def _known_entities(conn: sqlite3.Connection) -> dict[str, set]:
+    """
+    Return all known canonical entity keys per type from the DB.
+    Used to compute coverage_gain for each new paper.
+
+    SCHEMA FIX: The old reader queried entities.text_norm (its own schema).
+    The KG schema has no text_norm — it uses canonical_text and entity_type.
+    We derive a normalised key from canonical_text using the same logic
+    as normalize_entity_text() in kg_population: lowercase + strip punct.
+    This means coverage_gain uses the same canonical keys the KG uses.
+    """
+    import re as _re
+    import string as _string
+    import unicodedata as _unicodedata
+
+    _PUNCT = str.maketrans("", "", _string.punctuation.replace("-", ""))
+
+    def _norm(text: str) -> str:
+        t = _unicodedata.normalize("NFC", text).lower()
+        t = t.translate(_PUNCT)
+        return _re.sub(r"\s+", " ", t).strip()
+
     known: dict[str, set] = {
         "method": set(), "dataset": set(),
         "metric": set(), "task":    set(),
     }
-    for text_norm, etype in conn.execute(
-        "SELECT text_norm, entity_type FROM entities"
-    ).fetchall():
-        if etype in known:
-            known[etype].add(text_norm)
+
+    # Try KG schema first (canonical_text column)
+    try:
+        for canonical_text, etype in conn.execute(
+            "SELECT canonical_text, entity_type FROM entities"
+        ).fetchall():
+            if etype in known:
+                known[etype].add(_norm(canonical_text))
+        return known
+    except sqlite3.OperationalError:
+        pass
+
+    # Fallback: old reader schema (text_norm column) — for transitional DBs
+    try:
+        for text_norm, etype in conn.execute(
+            "SELECT text_norm, entity_type FROM entities"
+        ).fetchall():
+            if etype in known:
+                known[etype].add(text_norm)
+    except sqlite3.OperationalError:
+        pass
+
     return known
 
 
@@ -451,39 +449,44 @@ def _extract_abstract(paper: dict) -> str:
 
 
 def _write_paper_to_db(paper: dict, record: PaperRecord, conn: sqlite3.Connection) -> None:
+    """
+    Write paper metadata to the papers table.
+
+    SCHEMA FIX: The reader no longer writes to the entities table directly.
+    Entity writes happen via kg_population (called in ExtractionPipeline step 4).
+    The KG owns entity canonicalisation and the paper_entity_relationships table.
+    If the reader wrote entities using its own schema (UUID PK, paper_id FK,
+    text_norm) it would conflict with the KG's schema (entity_id="method::lstm",
+    canonical_text, raw_variants).
+
+    The reader's job is:
+      - Write paper metadata + reader-specific fields to papers table
+      - KG population writes all entity data
+    """
+    meta = paper.get("metadata", {})
     conn.execute(
         """INSERT OR REPLACE INTO papers
-           (paper_id, title, authors, year, venue, abstract, source_path,
-            n_claims, n_entities, n_limitations, coverage_gain, action, processed_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           (paper_id, title, authors, year, venue, doi, abstract,
+            source_path, n_claims, n_entities, n_limitations,
+            coverage_gain, action, processed_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            record.paper_id, record.title, record.authors,
-            record.year, record.venue, record.abstract,
-            record.source_path, record.n_claims, record.n_entities,
-            record.n_limitations, record.coverage_gain,
-            record.action, record.processed_at,
+            record.paper_id,
+            record.title,
+            record.authors,
+            record.year,
+            record.venue,
+            meta.get("doi", ""),       # include doi from metadata
+            record.abstract,
+            record.source_path,
+            record.n_claims,
+            record.n_entities,
+            record.n_limitations,
+            record.coverage_gain,
+            record.action,
+            record.processed_at,
         ),
     )
-    all_ents = paper.get("entities", []) or paper.get("llm_entities", [])
-    for ent in all_ents:
-        text      = (ent.get("text") or "").strip()
-        text_norm = text.lower()
-        if not text_norm:
-            continue
-        conn.execute(
-            """INSERT OR IGNORE INTO entities
-               (entity_id, paper_id, text, text_norm, entity_type,
-                section_type, confidence, source)
-               VALUES (?,?,?,?,?,?,?,?)""",
-            (
-                str(uuid.uuid4()), record.paper_id,
-                text, text_norm,
-                ent.get("entity_type", ""),
-                ent.get("section_type", ""),
-                float(ent.get("confidence", 1.0)),
-                ent.get("source", "llm"),
-            ),
-        )
     conn.commit()
 
 
@@ -987,7 +990,7 @@ Examples:
   python agents/reader_agent.py --no-extraction --verbose
 
   # Different memory dir
-  python agents/reader_agent.py --papers-dir data_1/ --memory-dir memory/ --verbose
+  python agents/reader_agent.py --papers-dir Data/ --memory-dir memory/ --verbose
         """,
     )
     parser.add_argument("--papers-dir",   default=str(PAPERS_DIR),
