@@ -2,27 +2,10 @@
 embedder.py
 -----------
 Takes the chunk list from chunker.py and adds an 'embedding'
-field to each chunk. Nothing is stored here — this step only
-adds vectors to the existing chunk dicts.
+field to each chunk. 
 
 Model: BAAI/bge-base-en-v1.5
   - 768 dimensions
-  - Runs locally, no API key needed
-  - First run downloads ~440MB to ~/.cache/huggingface/
-  - CPU speed: ~2-4 seconds per batch of 32 chunks
-  - For 379 chunks → roughly 30-60 seconds total on CPU
-
-Usage:
-    from rag.embedder import embed_chunks
-
-    chunks   = chunk_paper("memory/stgcn_yu_2018", "stgcn_yu_2018")
-    chunks   = embed_chunks(chunks)
-
-    # now every chunk has an 'embedding' field
-    print(len(chunks[0]["embedding"]))   # → 768
-
-Install:
-    pip install sentence-transformers
 """
 
 import logging
@@ -34,23 +17,16 @@ logger = logging.getLogger(__name__)
 # ── model config ──────────────────────────────────────────────────────────
 MODEL_NAME   = "BAAI/bge-base-en-v1.5"
 EMBED_DIM    = 768
-BATCH_SIZE   = 32     # safe for CPU RAM — increase to 64 if you have 16GB+
-
-# BGE models need this prefix on the QUERY side only (not documents).
-# Since we're embedding documents here, no prefix needed.
-# (The retriever adds the prefix when embedding the user's question.)
+BATCH_SIZE   = 32     
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
 
-# ── module-level model cache ───────────────────────────────────────────────
-# Model is loaded once and reused across multiple embed_chunks() calls.
-# Loading takes ~4 seconds — we don't want to repeat that per paper.
+
 _model = None
 
 def _get_model():
     """
     Loads the model on first call, returns cached model on subsequent calls.
-    Prints a clear message on first download so the user knows what's happening.
     """
     global _model
     if _model is not None:
@@ -76,22 +52,12 @@ def _get_model():
     return _model
 
 
-# ── public entry point ────────────────────────────────────────────────────
+
 
 def embed_chunks(chunks: list[dict]) -> list[dict]:
     """
     Adds an 'embedding' field (list of 768 floats) to every chunk.
     Modifies chunks in-place AND returns the list.
-
-    Args:
-        chunks: List of chunk dicts from chunker.chunk_paper()
-
-    Returns:
-        Same list with 'embedding' field added to every chunk.
-
-    Example:
-        chunks = embed_chunks(chunks)
-        print(len(chunks[0]["embedding"]))   # 768
     """
     if not chunks:
         logger.warning("embed_chunks called with empty list")
@@ -122,9 +88,6 @@ def embed_chunks(chunks: list[dict]) -> list[dict]:
 def embed_query(query_text: str) -> list[float]:
     """
     Embeds a single query string for retrieval.
-    Uses the BGE query prefix — this is important for retrieval quality.
-    Called by retriever.py, not by the indexing pipeline.
-
     Args:
         query_text: The user's question or search string.
 
@@ -137,12 +100,11 @@ def embed_query(query_text: str) -> list[float]:
     return vector.tolist()
 
 
-# ── internal batching ─────────────────────────────────────────────────────
 
 def _embed_in_batches(model, texts: list[str]) -> list[list[float]]:
     """
     Embeds texts in batches with a simple progress display.
-    Returns list of embedding vectors (as plain Python lists, not numpy).
+    Returns list of embedding vectors
 
     normalize_embeddings=True means all vectors have length 1.
     This makes cosine similarity equivalent to dot product,
@@ -157,13 +119,12 @@ def _embed_in_batches(model, texts: list[str]) -> list[list[float]]:
         # encode the batch
         vectors = model.encode(
             batch,
-            normalize_embeddings=True,   # unit vectors — required for cosine similarity
-            show_progress_bar=False,     # we handle our own progress display
+            normalize_embeddings=True,   
+            show_progress_bar=False,     
             batch_size=BATCH_SIZE,
         )
 
-        # convert numpy arrays to plain Python lists
-        # ChromaDB requires plain Python lists, not numpy arrays
+       
         all_embeddings.extend([v.tolist() for v in vectors])
 
         # progress display
