@@ -1,10 +1,4 @@
-"""
-chunker.py
-----------
-Integrated version: 
-1. Uses claims_output.json["paper_id"] as the single source of truth (Friend's logic).
-2. Uses enumerate() indexing to ensure unique ChromaDB IDs (Your logic).
-"""
+
 
 import json
 import hashlib
@@ -25,23 +19,20 @@ logger = logging.getLogger(__name__)
 EMBED_MODEL = "BAAI/bge-base-en-v1.5"
 EMBED_MODEL_VERSION = "1.0"
 
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
+
 
 def chunk_paper(folder_path: str) -> list[dict]:
     """
-    Main entry point. Reads the output_folder for one paper.
+    Reads the output_folder for one paper.
     paper_id is read directly from claims_output.json (Friend's logic).
     """
     folder = Path(folder_path)
     
-    # Load required source files to find the ID first
     claims_data   = _load_json(folder / "claims_output.json")
     sections_data = _load_json(folder / "sections.json")
     figures_data  = _load_json(folder / "figures.json", required=False)
 
-    # READ paper_id directly from JSON (Friend's requirement)
+    # READ paper_id directly from JSON 
     paper_id = _get_paper_id(claims_data, folder)
     
     # Verify folder now that we have the proper ID
@@ -53,7 +44,7 @@ def chunk_paper(folder_path: str) -> list[dict]:
 
     chunks = []
 
-    # Your indexing logic (enumerate) preserved for uniqueness
+   
     chunks.extend(_chunk_claims(claims_data, paper_id, paper_title))
     chunks.extend(_chunk_limitations(claims_data, paper_id, paper_title))
     chunks.extend(_chunk_future_work(claims_data, paper_id, paper_title))
@@ -65,15 +56,10 @@ def chunk_paper(folder_path: str) -> list[dict]:
 
     return chunks
 
-# ---------------------------------------------------------------------------
-# Source file loaders
-# ---------------------------------------------------------------------------
+
 
 def _get_paper_id(claims_data: dict, folder: Path) -> str:
-    """
-    Friend's Logic: Reads paper_id from claims_output.json['paper_id'].
-    Falls back to folder name if field is missing.
-    """
+    
     paper_id = claims_data.get("paper_id", "")
     if paper_id:
         return validate_paper_id(paper_id)
@@ -102,21 +88,20 @@ def _get_paper_title(claims_data: dict, paper_id: str) -> str:
     except (KeyError, TypeError):
         return paper_id
 
-# ---------------------------------------------------------------------------
+
 # Chunk ID generation - YOUR UNIQUE INDEXING LOGIC
-# ---------------------------------------------------------------------------
+
 
 def _make_chunk_id(paper_id: str, content: str, index: int = 0) -> str:
     """
-    Your Logic: Uses an occurrence index to ensure unique IDs 
+    Logic: Uses an occurrence index to ensure unique IDs 
     even if the same sentence appears twice.
     """
     raw = f"{paper_id}::{content}::{index}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
 
-# ---------------------------------------------------------------------------
-# Numeric/Entity helpers
-# ---------------------------------------------------------------------------
+
+
 
 def _extract_numeric(claim: dict) -> tuple[bool, float | None]:
     value = claim.get("value")
@@ -136,9 +121,7 @@ def _extract_entity_fields(claim: dict) -> dict:
         "metrics_mentioned": "",
     }
 
-# ---------------------------------------------------------------------------
-# Specialized Chunking Functions
-# ---------------------------------------------------------------------------
+
 
 def _chunk_claims(claims_data: dict, paper_id: str, paper_title: str) -> list[dict]:
     claims = claims_data.get("claims", [])
