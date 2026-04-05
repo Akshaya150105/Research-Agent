@@ -5,8 +5,7 @@ Runs after ALL papers are indexed. Performs three passes that
 transform isolated per-paper chunks into a connected cross-paper
 knowledge base.
 
-This file does nothing useful with just one paper.
-It becomes valuable once you have 2+ papers indexed.
+
 
 Three passes:
     Pass 1 — Entity linking
@@ -26,15 +25,7 @@ Three passes:
         Writes: memory/gap_matrix.json
         Powers: gap detection agent
 
-Usage:
-    from rag.enricher import run_all_passes
-    run_all_passes()
 
-Run this after indexing all papers:
-    pipeline.index_paper("memory/stgcn_yu_2018",  "stgcn_yu_2018")
-    pipeline.index_paper("memory/dcrnn_li_2018",  "dcrnn_li_2018")
-    pipeline.index_paper("memory/gwnet_wu_2019",  "gwnet_wu_2019")
-    run_all_passes()
 """
 
 import json
@@ -47,8 +38,6 @@ logger = logging.getLogger(__name__)
 MEMORY_DIR = Path("memory")
 
 
-# ── normalization helper ──────────────────────────────────────────────────
-
 def _normalize_entity_text(text: str) -> str:
     """
     Light normalization for entity matching across papers.
@@ -58,7 +47,6 @@ def _normalize_entity_text(text: str) -> str:
     return text.strip().lower()
 
 
-# ── public entry point ────────────────────────────────────────────────────
 
 def run_all_passes() -> dict:
     """
@@ -88,32 +76,23 @@ def run_all_passes() -> dict:
     return results
 
 
-# ── Pass 1: Entity linking ────────────────────────────────────────────────
 
 def _pass1_entity_linking() -> dict:
     """
     Groups entities by normalized text + type across all papers.
     Updates also_in_papers and appears_in_n_papers for entities
     that appear in more than one paper.
-
-    Example result:
-        entity "STGCN" appears in stgcn_yu_2018 + dcrnn_li_2018
-        → both chunks get also_in_papers = "dcrnn_li_2018" / "stgcn_yu_2018"
-        → both get appears_in_n_papers = 2
     """
     print("  Pass 1: Entity linking...")
     from rag.indexer import get_collections
     collections = get_collections()
     eg = collections["entities_global"]
 
-    # fetch all entity chunks
     result = eg.get(include=["metadatas"])
     if not result["ids"]:
         print("  Pass 1: No entities found, skipping.")
         return {"linked_entities": 0, "updated_chunks": 0}
 
-    # group chunk_ids by (normalized_text, entity_type)
-    # key → {paper_id → [chunk_id, ...]}
     entity_map: dict[tuple, dict[str, list]] = defaultdict(lambda: defaultdict(list))
 
     for chunk_id, meta in zip(result["ids"], result["metadatas"]):
@@ -123,7 +102,7 @@ def _pass1_entity_linking() -> dict:
         if text and etype and pid:
             entity_map[(text, etype)][pid].append(chunk_id)
 
-    # find entities that appear in 2+ papers
+  
     cross_paper = {
         key: paper_dict
         for key, paper_dict in entity_map.items()
@@ -137,14 +116,13 @@ def _pass1_entity_linking() -> dict:
         print("     (Only one paper indexed — re-run after adding more papers)")
         return {"linked_entities": 0, "updated_chunks": 0}
 
-    # update each affected chunk
     updated_chunks = 0
     for (text, etype), paper_dict in cross_paper.items():
         all_paper_ids = list(paper_dict.keys())
         n_papers      = len(all_paper_ids)
 
         for paper_id, chunk_ids in paper_dict.items():
-            # other papers this entity appears in
+
             others = [p for p in all_paper_ids if p != paper_id]
             also_in_papers = ",".join(others)
 
@@ -165,7 +143,6 @@ def _pass1_entity_linking() -> dict:
     }
 
 
-# ── Pass 2: Contradiction candidate flagging ──────────────────────────────
 
 def _pass2_contradiction_candidates() -> dict:
     """
@@ -175,15 +152,11 @@ def _pass2_contradiction_candidates() -> dict:
 
     These are CANDIDATES — not confirmed contradictions.
     The comparison agent uses LLM reasoning to confirm.
-
-    Writes: memory/contradiction_candidates.json
     """
     print("\n  Pass 2: Contradiction candidate flagging...")
     from rag.indexer import get_collections
     collections = get_collections()
     caf = collections["claims_and_findings"]
-
-    # get all comparative claims with numeric values
     result = caf.get(
         where={"$and": [
             {"claim_type":       {"$eq": "comparative"}},
@@ -267,16 +240,7 @@ def _pass3_gap_matrix() -> dict:
     Builds a method × dataset co-occurrence matrix.
     An empty cell = research gap (method never tested on that dataset).
 
-    Structure of gap_matrix.json:
-    {
-        "methods":  {"STGCN": ["stgcn_yu_2018"], "DCRNN": ["dcrnn_li_2018"]},
-        "datasets": {"PeMSD7": ["stgcn_yu_2018"], "METR-LA": ["dcrnn_li_2018"]},
-        "matrix":   {"STGCN": {"PeMSD7": ["stgcn_yu_2018"], "METR-LA": []}},
-        "gaps":     [{"method": "STGCN", "dataset": "METR-LA", "gap_score": 2}]
-    }
-
-    gap_score = (papers using method) + (papers using dataset)
-    Higher score = more significant gap (both sides are well-studied)
+    
 
     Writes: memory/gap_matrix.json
     """
@@ -325,13 +289,12 @@ def _pass3_gap_matrix() -> dict:
     for method in methods:
         matrix[method] = {}
         for dataset in datasets:
-            # papers that use BOTH this method AND this dataset
+            
             shared = list(
                 set(methods[method]) & set(datasets[dataset])
             )
             matrix[method][dataset] = shared
 
-    # find gaps (empty cells) and score them
     gaps = []
     for method, dataset_row in matrix.items():
         for dataset, shared_papers in dataset_row.items():
