@@ -4,8 +4,6 @@ indexer.py
 Takes embedded chunks from embedder.py and upserts them into
 the correct ChromaDB collections.
 
-This step is idempotent — running it twice on the same paper
-produces the same result. No duplicates, no errors.
 
 Collections populated here:
     paper_sections      ← section and figure chunks
@@ -13,15 +11,6 @@ Collections populated here:
     entities_global     ← entity chunks
     researcher_feedback ← written at runtime by agents, NOT here
 
-Usage:
-    from rag.indexer import index_chunks, get_collections
-
-    chunks = chunk_paper(...)
-    chunks = embed_chunks(chunks)
-    index_chunks(chunks)
-
-Install:
-    pip install chromadb
 """
 
 import logging
@@ -29,13 +18,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# ── ChromaDB store location ───────────────────────────────────────────────
-# All 4 collections live in this single folder.
-# Add rag/chroma_store/ to your .gitignore — it can get large.
+
 CHROMA_STORE_PATH = "rag/chroma_store"
 
-# ── collection routing ────────────────────────────────────────────────────
-# Which chunk_type goes into which collection.
 COLLECTION_MAP = {
     "section":     "paper_sections",
     "figure":      "paper_sections",
@@ -46,10 +31,6 @@ COLLECTION_MAP = {
 }
 
 # ── metadata fields stored in ChromaDB ───────────────────────────────────
-# ChromaDB stores metadata as a flat dict alongside each document.
-# These are the fields that become filterable via where= clauses.
-# 'embedding' and 'embed_text' are NOT included — embedding is stored
-# as a vector, embed_text is not needed after indexing.
 METADATA_FIELDS = [
     "paper_id",
     "paper_title",
@@ -74,7 +55,7 @@ METADATA_FIELDS = [
     "embed_model_version",
 ]
 
-# ── module-level client and collection cache ──────────────────────────────
+
 _client      = None
 _collections = {}
 
@@ -106,11 +87,7 @@ def _get_client():
 
 def get_collections() -> dict:
     """
-    Returns all 4 ChromaDB collections, creating them if they don't exist.
-    Uses cosine similarity space — matches our normalized embeddings.
-
-    Returns dict with keys:
-        paper_sections, claims_and_findings, entities_global, researcher_feedback
+    Returns all 4 ChromaDB collections.
     """
     global _collections
     if _collections:
@@ -134,15 +111,11 @@ def get_collections() -> dict:
     return _collections
 
 
-# ── metadata extraction ───────────────────────────────────────────────────
 
 def _extract_metadata(chunk: dict) -> dict:
     """
     Extracts only the filterable metadata fields from a chunk.
-    Skips embed_text, display_text, embedding — those are stored separately.
-
-    ChromaDB metadata values must be: str, int, float, or bool.
-    No None values — we default to "" or 0.0 if a field is missing.
+   
     """
     metadata = {}
     for field in METADATA_FIELDS:
@@ -162,20 +135,11 @@ def _extract_metadata(chunk: dict) -> dict:
     return metadata
 
 
-# ── core upsert function ──────────────────────────────────────────────────
+
 
 def index_chunks(chunks: list[dict]) -> dict:
     """
     Upserts all chunks into the correct ChromaDB collections.
-    Idempotent — safe to run multiple times on the same paper.
-
-    Args:
-        chunks: List of chunk dicts with 'embedding' field populated.
-                (output of embedder.embed_chunks)
-
-    Returns:
-        Dict with counts of chunks inserted per collection.
-        e.g. {"paper_sections": 14, "claims_and_findings": 163, "entities_global": 202}
     """
     if not chunks:
         logger.warning("index_chunks called with empty list")
@@ -228,8 +192,6 @@ def index_chunks(chunks: list[dict]) -> dict:
     return counts
 
 
-# ── inspection helpers ────────────────────────────────────────────────────
-
 def collection_counts() -> dict:
     """
     Returns the number of documents in each collection.
@@ -243,11 +205,6 @@ def peek_collection(collection_name: str, n: int = 3) -> list[dict]:
     """
     Returns the first n documents from a collection for inspection.
     Shows metadata and a snippet of the document text.
-
-    Args:
-        collection_name: one of paper_sections, claims_and_findings,
-                         entities_global, researcher_feedback
-        n: number of documents to return (default 3)
     """
     collections = get_collections()
     if collection_name not in collections:
@@ -269,10 +226,6 @@ def delete_paper(paper_id: str) -> dict:
     """
     Removes all chunks for a given paper from all collections.
     Useful when you want to re-index a paper after updating its JSONs.
-
-    Args:
-        paper_id: e.g. "stgcn_yu_2018"
-
     Returns:
         Dict with number of documents deleted per collection.
     """
