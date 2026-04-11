@@ -164,9 +164,7 @@ def _print_summary(result: dict, metadata: dict):
     print(f"{'='*60}\n")
 
 
-# ---------------------------------------------------------------------------
 # Batch runner — process multiple grobid output folders at once
-# ---------------------------------------------------------------------------
 
 def run_batch(
     root_dir: str,
@@ -218,10 +216,10 @@ def run_batch(
 
             results.append({"folder": str(folder), "paper_id": paper_id, "status": "ok",
                             "entities": result["total_entities"]})
-            print(f"[Batch] ✓ {paper_id} — {result['total_entities']} entities")
+            print(f"[Batch]  {paper_id} — {result['total_entities']} entities")
 
         except Exception as e:
-            print(f"[Batch] ✗ {folder.name} — ERROR: {e}")
+            print(f"[Batch]  {folder.name} — ERROR: {e}")
             results.append({"folder": str(folder), "status": "error", "error": str(e)})
 
     # Write batch summary

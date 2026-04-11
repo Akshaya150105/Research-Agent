@@ -1,51 +1,3 @@
-"""
-writer_agent.py  v1.0.0
-========================
-Person 3 — AI Agents  |  Branch: feat/agents  |  Folder: agents/
-
-Phase 7: Writer Agent
----------------------
-The Writer Agent is the LAST agent the Planner calls. It synthesises
-everything stored in shared memory into a structured, citation-aware
-literature review in Markdown.
-
-Critical design rule:
-  The Writer NEVER reads raw PDFs or raw paper text.
-  It reads ONLY from:
-    - SQLite:  papers, entities, comparisons, critiques, gaps tables
-    - data_1/agent_outputs/: JSON files from Comparator, Critic, Gap Detector
-    - claims_output.json:   claims[] and limitations[] arrays per paper
-
-This ensures every claim in the review is traceable to a structured
-data source, not a hallucinated summary.
-
-Review structure:
-  1. Introduction — topic overview, corpus summary
-  2. Methods & Approaches — what methods are used across papers
-  3. Results & Performance — key findings and numeric results
-  4. Contradictions & Debates — Comparator findings
-  5. Common Limitations — Critic + Comparator weakness patterns
-  6. Research Gaps & Future Directions — Gap Detector output
-  7. Conclusion
-  8. References
-
-LLM usage:
-  Each section is drafted by prompting Gemini with ONLY structured
-  data (entity lists, comparison JSON, gap JSON). No raw text is passed.
-
-Outputs:
-  data_1/agent_outputs/reviews/session_{id}_draft.md
-
-Usage (standalone):
-  python agents/writer_agent.py --verbose
-  python agents/writer_agent.py --topic "neural machine translation" --verbose
-
-Usage (from Planner / LangGraph):
-  from agents.writer_agent import WriterAgent
-  agent = WriterAgent(verbose=True)
-  result = agent.run(state)
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -71,7 +23,6 @@ _PROJECT_ROOT = _AGENTS_DIR.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-# ── config ────────────────────────────────────────────────────
 MEMORY_DIR    = pathlib.Path("memory")
 SHARED_MEMORY = pathlib.Path("shared_memory")
 DB_PATH       = SHARED_MEMORY / "research.db"
@@ -89,10 +40,7 @@ LLM_TIMEOUT     = 90
 LLM_MAX_RETRIES = 3
 LLM_RETRY_DELAY = 30
 
-
-# ─────────────────────────────────────────────────────────────
 #  DATA MODELS
-# ─────────────────────────────────────────────────────────────
 
 @dataclass
 class WriterReport:
@@ -107,10 +55,6 @@ class WriterReport:
     elapsed_s:     float = 0.0
     react_trace:   list  = field(default_factory=list)
 
-
-# ─────────────────────────────────────────────────────────────
-#  LLM HELPER
-# ─────────────────────────────────────────────────────────────
 
 def _call_gemini(prompt: str, max_tokens: int = 2000) -> str:
     key = os.environ.get("GEMINI_API_KEY", "")
@@ -144,17 +88,13 @@ def _call_gemini(prompt: str, max_tokens: int = 2000) -> str:
     raise RuntimeError(f"Gemini failed: {last_err}")
 
 
-# ─────────────────────────────────────────────────────────────
-#  DATA LOADING — reads ONLY structured outputs
-# ─────────────────────────────────────────────────────────────
-
+#reads ONLY structured outputs
 def _load_papers_from_db(db_path: pathlib.Path) -> list[dict]:
     if not db_path.exists():
         return []
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    # REMOVED: WHERE action = 'read'
-    # This ensures papers already in DB are included in the review
+
     rows = conn.execute(
         "SELECT * FROM papers ORDER BY year"
     ).fetchall()
@@ -168,7 +108,7 @@ def _load_entities_for_paper(paper_id: str, db_path: pathlib.Path) -> dict[str, 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     
-    # NEW QUERY: Must join with paper_entity_relationships to find which 
+    # join with paper_entity_relationships to find which 
     # canonical entities belong to this specific paper.
     query = """
         SELECT e.canonical_text, e.entity_type 
@@ -191,7 +131,6 @@ def _load_entities_for_paper(paper_id: str, db_path: pathlib.Path) -> dict[str, 
 
 
 def _load_claims_from_memory(paper_id: str, memory_dir: pathlib.Path) -> list[dict]:
-    """Load claims[] from the paper's claims_output.json."""
     for folder in memory_dir.iterdir():
         if not folder.is_dir():
             continue
@@ -225,7 +164,6 @@ def _load_limitations_from_memory(paper_id: str, memory_dir: pathlib.Path) -> li
 
 def _load_comparisons(comparisons_dir: pathlib.Path) -> list[dict]:
     results = []
-    # Use resolve() to handle Windows pathing and glob strictly
     abs_path = comparisons_dir.resolve()
     if not abs_path.exists():
         return results
@@ -234,7 +172,7 @@ def _load_comparisons(comparisons_dir: pathlib.Path) -> list[dict]:
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-                if data: # Ensure not empty
+                if data: 
                     results.append(data)
         except Exception as e:
             print(f"DEBUG: Writer failed to load comparison {path.name}: {e}")
@@ -269,13 +207,9 @@ def _load_gaps(gaps_dir: pathlib.Path) -> list[dict]:
             pass
     return results
 
-
-# ─────────────────────────────────────────────────────────────
 #  SECTION GENERATORS
-# ─────────────────────────────────────────────────────────────
 
 def _make_citation(paper: dict) -> str:
-    """Return a short citation key like [Vaswani 2017]."""
     authors = json.loads(paper.get("authors", "[]"))
     first   = authors[0].split()[-1] if authors else "Unknown"
     year    = paper.get("year") or "?"
@@ -644,19 +578,15 @@ def _section_references(papers: list[dict]) -> str:
     return "\n".join(lines)
 
 
-# ─────────────────────────────────────────────────────────────
 #  WRITER AGENT
-# ─────────────────────────────────────────────────────────────
 
 class WriterAgent:
-    """
-    Synthesises all structured agent outputs into a Markdown
-    literature review.
 
-    LangGraph integration:
-      Planner calls agent.run(state) after Comparator, Critic,
-      and Gap Detector have all completed.
-    """
+    #Synthesises all structured agent outputs into a Markdown literature review.
+
+    #LangGraph integration:
+    #  Planner calls agent.run(state) after Comparator, Critic,
+    #  and Gap Detector have all completed.
 
     VERSION = "1.0.0"
 
@@ -691,22 +621,13 @@ class WriterAgent:
         entry = f"[OBS]   {msg}"; self.trace.append(entry)
         if self.verbose: print(f"  {entry}")
 
-    # ── LangGraph entry point ─────────────────────────────────
-
     def run(self, state: dict) -> dict:
-        """
-        Called by the Planner node in LangGraph.
+        #Called by the Planner node in LangGraph.
 
-        Args:
-            state: The shared AgentState. Must contain:
-                     - session_id (str)
-                   Optional:
-                     - topic (str)   — research topic string
-                     - use_llm (bool)
+        #Args - state: The shared AgentState. Must contain: - session_id (str), optional: - topic (str)   — research topic string , - use_llm (bool)
 
-        Returns:
-            Updated state dict with "writer_report" key added.
-        """
+        #Returns: Updated state dict with "writer_report" key added.
+        
         session_id = state.get("session_id", str(uuid.uuid4())[:8])
         topic      = state.get("topic", "")
         use_llm    = state.get("use_llm", True)
@@ -714,9 +635,7 @@ class WriterAgent:
 
         report = self._run_internal(session_id, topic, backend)
         return {**state, "writer_report": asdict(report)}
-
-    # ── Internal logic ────────────────────────────────────────
-
+    
     def _run_internal(
         self,
         session_id: str,
@@ -732,7 +651,7 @@ class WriterAgent:
             def llm_fn(prompt: str, max_tokens: int = 600) -> str:
                 return _call_gemini(prompt, max_tokens)
 
-        # ── Load all structured data ──────────────────────────
+        # Load all structured data 
         self._think("Loading papers from SQLite")
         papers = _load_papers_from_db(self.db_path)
         if not papers:
@@ -772,7 +691,7 @@ class WriterAgent:
             for comp in comparisons
         )
 
-        # ── Generate review section by section ────────────────
+        # Generate review section by section
         self._think("Generating review sections")
         sections = []
 
@@ -805,7 +724,6 @@ class WriterAgent:
         self._act("Section 8: References")
         sections.append(_section_references(papers))
 
-        # ── Save ──────────────────────────────────────────────
         review_text = "\n\n".join(sections)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         out_path = self.output_dir / f"session_{session_id}_draft.md"
@@ -819,8 +737,6 @@ class WriterAgent:
         report.react_trace = self.trace
         return report
 
-    # ── Standalone CLI ────────────────────────────────────────
-
     def print_report(self, report: WriterReport) -> None:
         print("\n" + "═" * 56)
         print("  WRITER AGENT REPORT  (v1.0.0)")
@@ -833,10 +749,6 @@ class WriterAgent:
         print(f"  Output          : {report.output_path}")
         print("═" * 56 + "\n")
 
-
-# ─────────────────────────────────────────────────────────────
-#  CLI
-# ─────────────────────────────────────────────────────────────
 
 def main():
     import argparse

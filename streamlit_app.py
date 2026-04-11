@@ -1,10 +1,3 @@
-"""
-Research Paper Analysis Pipeline — Streamlit Frontend (v2)
-══════════════════════════════════════════════════════════
-Pipeline stages:
-  Upload / Search → GROBID Parser → SciBERT NER → LLM Claim Extraction
-  Results saved to output_papers/<paper_id>/ folders.
-"""
 
 import json
 import os
@@ -26,18 +19,12 @@ from grobid_parser.utils import save_grobid_output
 if "arxiv_expansion" not in st.session_state:
     st.session_state.arxiv_expansion = None
 
-# ─────────────────────────────────────────────────────────────────────
-# Cached model loader — runs ONCE, survives reruns
-# ─────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Loading SciBERT NER model (one-time)…")
 def load_ner_extractor():
     from ner_pipeline.ner_extractor import SciBERTNERExtractor
     return SciBERTNERExtractor()
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Page config & CSS
-# ─────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Research Paper Analyzer",
     page_icon="🔬",
@@ -118,9 +105,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────────────
-# Sidebar — Settings
-# ─────────────────────────────────────────────────────────────────────
+#sidebar
 with st.sidebar:
     st.markdown("## ⚙️ Settings")
  
@@ -131,21 +116,21 @@ with st.sidebar:
  
     st.divider()
     st.markdown("#### 🔍 ArXiv Query Expansion")
-    st.caption("Gemini understands your natural language query and generates ArXiv search terms.")
-    gemini_api_key = st.text_input(
-        "Gemini API Key",
-        value=os.environ.get("GEMINI_API_KEY", ""),
+    st.caption("Groq understands your natural language query and generates ArXiv search terms.")
+    groq_api_key = st.text_input(
+        "Groq API Key",
+        value=os.environ.get("GROQ_API_KEY", ""),
         type="password",
         help=(
-            "Google AI Studio key for query expansion. "
-            "Get one free at https://aistudio.google.com/app/apikey"
+            "Groq API key for query expansion. "
+            "Get one free at https://console.groq.com/keys"
         ),
     )
-    gemini_model = st.selectbox(
-        "Gemini model",
-        ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"],
+    groq_model = st.selectbox(
+        "Groq model",
+        ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
         index=0,
-        help="gemini-2.0-flash is fastest and free-tier friendly.",
+        help="llama-3.3-70b-versatile is fast and highly capable.",
     )
  
     st.divider()
@@ -182,22 +167,20 @@ with st.sidebar:
             st.code(f"{h[:12]}…  →  {pid}", language=None)
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Session state
-# ─────────────────────────────────────────────────────────────────────
-if "arxiv_results"  not in st.session_state: st.session_state.arxiv_results  = []
-if "arxiv_selected" not in st.session_state: st.session_state.arxiv_selected = {}
-if "pipeline_queue" not in st.session_state: st.session_state.pipeline_queue = []
+#session state
+if "arxiv_results"   not in st.session_state: st.session_state.arxiv_results   = []
+if "arxiv_selected"  not in st.session_state: st.session_state.arxiv_selected  = {}
+if "pipeline_queue"  not in st.session_state: st.session_state.pipeline_queue  = []
+if "last_topic"      not in st.session_state: st.session_state.last_topic      = ""
+if "writer_review"   not in st.session_state: st.session_state.writer_review   = ""
+if "writer_out_path" not in st.session_state: st.session_state.writer_out_path = ""
 
 
-# ═════════════════════════════════════════════════════════════════════
 # TABS
-# ═════════════════════════════════════════════════════════════════════
+
 tab_arxiv, tab_upload = st.tabs(["🌐 ArXiv Search", "📂 Upload PDFs"])
 
-# ─────────────────────────────────────────────────────────────────────
 # TAB 1 — ArXiv Search
-# ─────────────────────────────────────────────────────────────────────
 with tab_arxiv:
     st.markdown("### 🔍 Search ArXiv in natural language")
     st.caption(
@@ -220,23 +203,25 @@ with tab_arxiv:
     with col_btn:
         search_clicked = st.button("Search", type="primary", use_container_width=True)
  
-    # ── Run search ────────────────────────────────────────────────────
+    # ── Run search 
     if search_clicked and arxiv_query.strip():
         with st.spinner("🤖 Understanding your query…"):
             try:
                 papers, expansion = arxiv_search_with_expansion(
                     natural_language_query=arxiv_query.strip(),
-                    gemini_api_key=gemini_api_key,
+                    groq_api_key=groq_api_key,
                     max_results=int(n_results),
-                    model=gemini_model,
+                    model=groq_model,
                 )
                 st.session_state.arxiv_results   = papers
                 st.session_state.arxiv_selected  = {}
                 st.session_state.arxiv_expansion = expansion
+                st.session_state.last_topic = (
+                    expansion.get("primary_query") or arxiv_query.strip()
+                )
             except Exception as exc:
                 st.error(f"Search failed: {exc}")
  
-    # ── Intent card ───────────────────────────────────────────────────
     expansion = st.session_state.get("arxiv_expansion")
     if expansion:
         status_icon = "✅" if expansion["expansion_ok"] else "⚠️"
@@ -357,11 +342,18 @@ with tab_arxiv:
                 prog.empty()
                 st.success(f"✅ {downloaded} paper(s) queued; {skipped} already in queue.")
 
-# ─────────────────────────────────────────────────────────────────────
 # TAB 2 — Upload PDFs
-# ─────────────────────────────────────────────────────────────────────
 with tab_upload:
-    st.markdown("### 📂 Upload PDF files")
+    st.markdown("### Upload PDF files")
+    
+
+    st.text_input(
+        "Research Topic (for Planner Agent)",
+        key="last_topic",
+        placeholder="e.g. Graph Neural Networks for Small Datasets",
+        help="Specify the topic of these papers so the Planner Agent can generate a focused literature review."
+    )
+
     st.markdown('<div class="upload-zone">', unsafe_allow_html=True)
     uploaded_files = st.file_uploader(
         "Upload research paper PDFs",
@@ -387,9 +379,7 @@ with tab_upload:
             st.success(f"➕ {added} file(s) added to the pipeline queue.")
 
 
-# ─────────────────────────────────────────────────────────────────────
 # Pipeline Queue — visible below tabs
-# ─────────────────────────────────────────────────────────────────────
 st.divider()
 st.markdown("## 🗂 Pipeline Queue")
 
@@ -398,7 +388,6 @@ if not queue:
     st.info("Queue is empty. Search ArXiv or upload PDFs above.")
     st.stop()
 
-# ── Classify every item ──────────────────────────────────────────────
 registry           = load_registry(output_root)
 seen_hashes: dict  = {}
 item_statuses      = []
@@ -415,13 +404,13 @@ for item in queue:
         seen_hashes[h] = item["name"]
         item_statuses.append(("new", None))
 
-# ── Summary ──────────────────────────────────────────────────────────
+# ── Summary 
 c1, c2, c3 = st.columns(3)
 c1.metric("In queue",           len(queue))
 c2.metric("Already indexed",    sum(1 for s, _ in item_statuses if s == "registry_dup"))
 c3.metric("Ready to process",   sum(1 for s, _ in item_statuses if s == "new"))
 
-# ── Per-item rows ────────────────────────────────────────────────────
+# ── Per-item rows 
 for item, (status, ref) in zip(queue, item_statuses):
     icon = "🌐" if item["source"] == "arxiv" else "📂"
     if status == "registry_dup":
@@ -456,9 +445,7 @@ if not new_items:
     st.stop()
 
 
-# ─────────────────────────────────────────────────────────────────────
 # GROBID worker (thread-pool target)
-# ─────────────────────────────────────────────────────────────────────
 def _grobid_parse_one(pdf_bytes: bytes, pdf_name: str, grobid_url: str):
     tmp_dir        = tempfile.mkdtemp(prefix="research_pipeline_")
     pdf_path       = Path(tmp_dir) / pdf_name
@@ -485,9 +472,7 @@ def _grobid_parse_one(pdf_bytes: bytes, pdf_name: str, grobid_url: str):
         return pdf_name, tmp_dir, None, None, None, str(e)
 
 
-# ─────────────────────────────────────────────────────────────────────
 # Run Pipeline
-# ─────────────────────────────────────────────────────────────────────
 st.divider()
 
 if st.button(
@@ -499,7 +484,7 @@ if st.button(
     overall = st.progress(0, text="Starting pipeline…")
     registry = load_registry(output_root)
 
-    # ── STAGE 1: GROBID ─────────────────────────────────────────────
+    # ── STAGE 1: GROBID 
     grobid_results: dict[str, tuple] = {}
 
     with st.status(
@@ -525,7 +510,7 @@ if st.button(
 
         s1.update(label=f"✅ Stage 1 — GROBID complete ({done}/{total})", state="complete")
 
-    # ── STAGE 2: NER ────────────────────────────────────────────────
+    # ── STAGE 2: NER 
     ner_extractor = load_ner_extractor()
     from ner_pipeline.ner_extractor import extract_entities_from_sections
     from ner_pipeline.pipeline import load_sections, _make_paper_id
@@ -579,7 +564,7 @@ if st.button(
             overall.progress((total + done) / (total * 3), text=f"NER: {done}/{total}")
         s2.update(label="✅ Stage 2 — NER complete", state="complete")
 
-    # ── STAGE 3: Claims + save + register ────────────────────────────
+    # Claims + save + register 
     with st.status("🧠 Stage 3 — LLM Claim Extraction…", expanded=True) as s3:
         done = 0
         for item in new_items:
@@ -619,7 +604,6 @@ if st.button(
             except Exception as e:
                 st.write(f"⚠️ **{pdf_name}**: claim extraction error — {e}")
 
-            # ── Persist outputs ──────────────────────────────────────
             paper_folder = Path(output_root) / paper_id
             paper_folder.mkdir(parents=True, exist_ok=True)
 
@@ -628,7 +612,11 @@ if st.button(
                     for f in Path(src_dir).glob("*.json"):
                         shutil.copy2(f, paper_folder / f.name)
 
-            shutil.copy2(Path(tmp_dir) / pdf_name, paper_folder / pdf_name)
+            
+            pdf_out_folder = PROJECT_ROOT / "data_1" / "papers"
+            pdf_out_folder.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(Path(tmp_dir) / pdf_name, pdf_out_folder / pdf_name)
+            
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
             register_paper(pdf_bytes, paper_id, registry, arxiv_id=arxiv_id)
@@ -639,6 +627,60 @@ if st.button(
 
         s3.update(label="✅ Stage 3 — Claims complete", state="complete")
 
+    _planner_topic = st.session_state.get("last_topic", "")
+
+    with st.status(
+        "🤖 Stage 4 — Planner Agent (Literature Review)…", expanded=True
+    ) as s4:
+        if _planner_topic:
+            st.write(f"🎯 Research topic: **{_planner_topic}**")
+        else:
+            st.write("ℹ️ No ArXiv topic found — running Planner without topic filter.")
+
+        try:
+            _agents_dir = str(PROJECT_ROOT / "agents")
+            if _agents_dir not in sys.path:
+                sys.path.insert(0, _agents_dir)
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
+
+            from planner_agent import PlannerAgent  
+
+            st.write("⚙️ Building LangGraph pipeline…")
+            planner     = PlannerAgent(verbose=True)
+            final_state = planner.run(
+                topic      = _planner_topic,
+                memory_dir = output_root,           
+                use_llm    = True,
+            )
+
+            rr = final_state.get("reader_report",     {})
+            cr = final_state.get("comparator_report", {})
+            gr = final_state.get("gap_report")  or    {}
+            wr = final_state.get("writer_report",     {})
+
+            st.write(
+                f"📚 Papers read: **{rr.get('papers_read', 0)}** &nbsp;·&nbsp; "
+                f"🔁 Contradictions: **{cr.get('n_contradictions_found', 0)}** &nbsp;·&nbsp; "
+                f"🔍 Gaps: **{len(gr.get('gaps', []))}**"
+            )
+
+            out_path = wr.get("output_path", "")
+            if out_path and Path(out_path).exists():
+                review_md = Path(out_path).read_text(encoding="utf-8")
+                st.session_state.writer_review   = review_md
+                st.session_state.writer_out_path = out_path
+                st.write(f"✅ Review saved → `{out_path}`")
+            else:
+                st.write("⚠️ Writer completed but no review file found.")
+
+        except Exception as _e:
+            import traceback
+            st.error(f"Planner Agent error: {_e}")
+            st.code(traceback.format_exc(), language="python")
+
+        s4.update(label="✅ Stage 4 — Literature Review complete", state="complete")
+
     overall.progress(1.0, text="All done!")
     st.balloons()
     st.success(f"🎉 {total} paper(s) processed! Results in `{output_root}`")
@@ -648,7 +690,6 @@ if st.button(
         i for i in st.session_state.pipeline_queue if i["name"] not in processed
     ]
 
-    # ── Per-paper results display ────────────────────────────────────
     for item in new_items:
         pdf_name = item["name"]
         _, enriched_data, ner_error = ner_results.get(pdf_name, (None, None, None))
@@ -694,3 +735,34 @@ if st.button(
                 mime="application/json",
                 key=f"dl_{paper_id}",
             )
+
+
+if st.session_state.get("writer_review"):
+    st.divider()
+    st.markdown("## 📝 Literature Review")
+    _col_info, _col_dl = st.columns([3, 1])
+    with _col_info:
+        if st.session_state.get("last_topic"):
+            st.caption(f"Topic: **{st.session_state.last_topic}**")
+        if st.session_state.get("writer_out_path"):
+            st.caption(f"Saved at: `{st.session_state.writer_out_path}`")
+    with _col_dl:
+        st.download_button(
+            label="⬇️ Download .md",
+            data=st.session_state.writer_review,
+            file_name="literature_review.md",
+            mime="text/markdown",
+        )
+
+    _review_text = st.session_state.writer_review
+    import re as _re
+    _sections = _re.split(r"(?=^## )", _review_text, flags=_re.MULTILINE)
+    if len(_sections) > 1:
+        for _sec in _sections:
+            if not _sec.strip():
+                continue
+            _title = _sec.splitlines()[0].lstrip("#").strip() or "Section"
+            with st.expander(_title, expanded=(_title.lower().startswith("intro"))):
+                st.markdown(_sec)
+    else:
+        st.markdown(_review_text)

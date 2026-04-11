@@ -14,37 +14,35 @@ def _t(tag: str) -> str:
 _XML_ID = "{http://www.w3.org/XML/1998/namespace}id"
 
 
-# ---------------------------------------------------------------------------
 # Output dataclasses
-# ---------------------------------------------------------------------------
 
 @dataclass
 class ParsedFigure:
-    figure_id: str        # xml:id e.g. "fig_0"
-    label: str            # "1", "2" …
-    caption: str          # full caption text
+    figure_id: str        
+    label: str            
+    caption: str          
 
 
 @dataclass
 class ParsedTable:
-    table_id: str         # xml:id e.g. "tab_1"
-    label: str            # "1", "3" …
-    caption: str          # figDesc text
-    rows: list[list[str]] # parsed cell content
+    table_id: str         
+    label: str           
+    caption: str          
+    rows: list[list[str]] 
 
 
 @dataclass
 class ParsedFormula:
-    formula_id: str       # xml:id e.g. "formula_0"
-    label: str            # "(2)", "(3)" … empty if unlabelled
-    content: str          # math expression text
+    formula_id: str       
+    label: str            
+    content: str          
 
 
 @dataclass
 class ParsedSection:
     section_type: str
     heading: str
-    text: str                              # inline prose and formulas
+    text: str                             
 
 
 @dataclass
@@ -67,9 +65,7 @@ class TEIParseResult:
     tables: list[ParsedTable] = field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
 # Heading classification
-# ---------------------------------------------------------------------------
 
 _HEADING_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"abstract",                                              re.I), "Abstract"),
@@ -126,10 +122,6 @@ def _classify_heading(heading: str) -> str:
     return "Unknown"
 
 
-# ---------------------------------------------------------------------------
-# Text helpers
-# ---------------------------------------------------------------------------
-
 _SKIP_EXTRACT_TAGS = {_t("ref"), _t("note")}
 
 
@@ -178,9 +170,8 @@ def _clean_title(raw: str) -> str:
     return raw
 
 
-# ---------------------------------------------------------------------------
+
 # Author filtering
-# ---------------------------------------------------------------------------
 
 _AFFILIATION_WORDS = re.compile(
     r"\b(university|institute|laboratory|lab|department|dept|"
@@ -202,9 +193,6 @@ def _is_valid_author(name: str) -> bool:
     return True
 
 
-# ---------------------------------------------------------------------------
-# Sub-section helpers
-# ---------------------------------------------------------------------------
 
 def _get_n(head_el: Optional[ET.Element]) -> str:
     if head_el is None:
@@ -226,26 +214,24 @@ def _top_level_number(n: str) -> str:
     return n.split(".")[0]
 
 
-# ---------------------------------------------------------------------------
 # Global figure / table / formula extraction
-# ---------------------------------------------------------------------------
 
 def _is_garbled_caption(text: str) -> bool:
-    """True if figDesc looks like body-text accidentally included as a caption."""
+    #True if figDesc looks like body-text accidentally included as a caption.
     return bool(_GARBLED_FIGDESC_RE.search(text)) if text else True
 
 
 def _is_garbled_table(rows: list[list[str]]) -> bool:
-    """
-    True if a table's rows look like flowing body-text rather than tabular data.
-    Heuristic: all rows have exactly one cell and that cell reads like a sentence.
-    """
+   
+    #True if a table's rows look like flowing body-text rather than tabular data.
+    #Heuristic: all rows have exactly one cell and that cell reads like a sentence.
+   
     if not rows:
         return True
     single_cell_rows = [r for r in rows if len(r) == 1]
     if len(single_cell_rows) < len(rows) * 0.8:
-        return False  # mostly multi-cell — real table
-    # Check if those cells look like prose sentences
+        return False  
+    
     prose_count = sum(
         1 for r in single_cell_rows
         if len(r[0].split()) > 5 and _BODY_TEXT_ROW_RE.search(r[0])
@@ -254,11 +240,11 @@ def _is_garbled_table(rows: list[list[str]]) -> bool:
 
 
 def _parse_all_figures(root: ET.Element) -> dict[str, ParsedFigure]:
-    """
-    Parse every real <figure> (not table) in the document.
-    Returns a dict keyed by xml:id.
-    Filters out figures with no label (fragments) or garbled captions.
-    """
+    
+    #Parse every real <figure> (not table) in the document.
+    #Returns a dict keyed by xml:id.
+    #Filters out figures with no label (fragments) or garbled captions.
+    
     figures: dict[str, ParsedFigure] = {}
     for fig in root.iter(_t("figure")):
         if fig.get("type") == "table":
@@ -283,12 +269,7 @@ def _parse_all_figures(root: ET.Element) -> dict[str, ParsedFigure]:
 
 
 def _rescue_caption_from_garbled_figdesc(raw: str) -> str:
-    """
-    GROBID sometimes dumps raw table data into figDesc followed by the real
-    caption sentence at the end. Try to recover the real caption:
-    split on '. ' and return the last sentence-like fragment (>= 5 words,
-    starts with a capital letter).
-    """
+
     sentences = re.split(r'\.\s+', raw)
     for candidate in reversed(sentences):
         candidate = candidate.strip()
@@ -300,12 +281,11 @@ def _rescue_caption_from_garbled_figdesc(raw: str) -> str:
 
 
 def _parse_all_tables(root: ET.Element) -> dict[str, ParsedTable]:
-    """
-    Parse every <figure type="table"> in the document.
-    Returns a dict keyed by xml:id.
-    Garbled captions are replaced with a rescued sentence from their tail.
-    Garbled rows (body-text fragments) are discarded.
-    """
+    
+    #Parse every <figure type="table"> in the document.
+    #Garbled captions are replaced with a rescued sentence from their tail.
+    #Garbled rows (body-text fragments) are discarded.
+    
     tables: dict[str, ParsedTable] = {}
     for fig in root.iter(_t("figure")):
         if fig.get("type") != "table":
@@ -318,7 +298,6 @@ def _parse_all_tables(root: ET.Element) -> dict[str, ParsedTable]:
         label = _clean(label_el.text or "") if label_el is not None else ""
         raw_caption = _clean(_element_text(figdesc_el)) if figdesc_el is not None else ""
 
-        # If caption looks garbled, try to rescue the real caption from its end
         if _is_garbled_caption(raw_caption):
             caption = _rescue_caption_from_garbled_figdesc(raw_caption)
         else:
@@ -350,7 +329,6 @@ def _parse_all_tables(root: ET.Element) -> dict[str, ParsedTable]:
 
 
 def _normalise_formula_label(label: str) -> str:
-    """Normalise labels: bare integer "10" -> "(10)", "(2)" stays "(2)"."""
     label = label.strip()
     if re.fullmatch(r'\d+', label):
         return f"({label})"
@@ -358,19 +336,19 @@ def _normalise_formula_label(label: str) -> str:
 
 
 def _merge_formula_fragments(formulas: list[tuple[str, str, str]]) -> list[ParsedFormula]:
-    """
-    Merge consecutive <formula> fragments that GROBID split from one equation.
+    
+    #Merge consecutive <formula> fragments that GROBID split from one equation.
 
-    Two passes:
-    Pass 1 (forward): merge tiny/unlabelled fragments into their PRECEDING entry
-      when the preceding entry is also unlabelled.
-    Pass 2 (forward): merge any remaining unlabelled fragment into the FOLLOWING
-      labelled entry (it is a preamble fragment of that equation).
-    """
+    #Two passes:
+    #Pass 1 (forward): merge tiny/unlabelled fragments into their PRECEDING entry
+    #  when the preceding entry is also unlabelled.
+    #Pass 2 (forward): merge any remaining unlabelled fragment into the FOLLOWING
+    #  labelled entry (it is a preamble fragment of that equation).
+    
     if not formulas:
         return []
 
-    # Pass 1 — merge trailing tiny fragments backward
+    # merge trailing tiny fragments backward
     p1: list[tuple[str, str, str]] = []
     for fid, label, content in formulas:
         if not content:
@@ -383,14 +361,14 @@ def _merge_formula_fragments(formulas: list[tuple[str, str, str]]) -> list[Parse
         else:
             p1.append((fid, label, content))
 
-    # Pass 2 — merge unlabelled preamble fragments forward into the next labelled entry
+    # merge unlabelled preamble fragments forward into the next labelled entry
     p2: list[tuple[str, str, str]] = []
     i = 0
     while i < len(p1):
         fid, label, content = p1[i]
         if (not label
                 and i + 1 < len(p1)
-                and p1[i + 1][1]):          # next entry has a label
+                and p1[i + 1][1]):          
             # absorb this fragment into the next entry
             next_fid, next_label, next_content = p1[i + 1]
             p1[i + 1] = (next_fid, next_label, (content + " " + next_content).strip())
@@ -410,13 +388,13 @@ def _extract_div_formulas(div: ET.Element) -> list[ParsedFormula]:
         fid = f.get(_XML_ID, "")
         content = _clean(_element_text(f))
         if _FIGURE_FORMULA_RE.search(content):
-            continue  # discard misplaced figure-label text
+            continue 
 
         label_el = f.find(_t("label"))
         raw_label = _clean(label_el.text or "") if label_el is not None else ""
         label = _normalise_formula_label(raw_label)
 
-        # Strip label from content (GROBID includes it inline in various forms)
+        # Strip label from content 
         if label:
             bare = label.strip("()")
             for pat in (re.escape(label), re.escape(bare)):
@@ -430,14 +408,13 @@ def _extract_div_formulas(div: ET.Element) -> list[ParsedFormula]:
 
 
 def _collect_figure_refs(div: ET.Element) -> list[str]:
-    """Collect xml:id targets of <ref type='figure'> inside a div."""
     ids: list[str] = []
     for ref in div.iter(_t("ref")):
         if ref.get("type") == "figure":
             tgt = ref.get("target", "").lstrip("#")
             if tgt:
                 ids.append(tgt)
-    # dedup preserving order
+
     seen: set[str] = set()
     out: list[str] = []
     for x in ids:
@@ -447,9 +424,7 @@ def _collect_figure_refs(div: ET.Element) -> list[str]:
     return out
 
 
-# ---------------------------------------------------------------------------
 # Per-div text (paragraphs only — no figure/table/formula dumps)
-# ---------------------------------------------------------------------------
 
 def _div_text(div: ET.Element) -> str:
     """Extract paragraph prose and formulas from a div."""
@@ -462,19 +437,13 @@ def _div_text(div: ET.Element) -> str:
     return " ".join(parts)
 
 
-# ---------------------------------------------------------------------------
 # Section assembly
-# ---------------------------------------------------------------------------
 
 def _parse_sections(root: ET.Element, all_tables: Optional[dict[str, ParsedTable]] = None) -> list[ParsedSection]:
-    """
-    Extract sections with per-section figures, tables, and formulas.
+    
+    #Extract sections with per-section figures, tables, and formulas.
 
-    Figures are assigned to sections via <ref type="figure"> targets found
-    in paragraph text. Tables are assigned similarly via <ref type="table">
-    (or by proximity — tables whose xml:id matches a figure ref target).
-    Formulas are local to the div they appear in.
-    """
+ 
     # Pre-build global figure and table registries
     all_figures = _parse_all_figures(root)
     if all_tables is None:
@@ -569,7 +538,6 @@ def _parse_sections(root: ET.Element, all_tables: Optional[dict[str, ParsedTable
                 if sections:
                     sections[-1] = _append_div_to_prev(sections[-1], div)
 
-    # Back matter
     back = root.find(f".//{_t('back')}")
     if back is not None:
         for div in back.iter(_t("div")):
@@ -586,7 +554,7 @@ def _parse_sections(root: ET.Element, all_tables: Optional[dict[str, ParsedTable
 
 
 def _merge_same_type(sections: list[ParsedSection]) -> list[ParsedSection]:
-    """Merge consecutive sections of the same type; drop sections with no content."""
+    #Merge consecutive sections of the same type; drop sections with no content.
     if not sections:
         return sections
     merged = [sections[0]]
@@ -606,9 +574,7 @@ def _merge_same_type(sections: list[ParsedSection]) -> list[ParsedSection]:
     ]
 
 
-# ---------------------------------------------------------------------------
 # Metadata extraction
-# ---------------------------------------------------------------------------
 
 def _parse_metadata(root: ET.Element) -> ParsedMetadata:
     meta = ParsedMetadata()
@@ -664,9 +630,7 @@ def _parse_metadata(root: ET.Element) -> ParsedMetadata:
     return meta
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 
 def _extract_docling_tables(pdf_path: str) -> list[ParsedTable]:
     import os
@@ -712,12 +676,7 @@ def _extract_docling_tables(pdf_path: str) -> list[ParsedTable]:
 
 
 def parse_tei(tei_xml: str, pdf_path: Optional[str] = None) -> TEIParseResult:
-    """
-    Parse a TEI XML string returned by GROBID.
 
-    Returns TEIParseResult with sections (each carrying text, figures,
-    tables, formulas), metadata, and success flag.
-    """
     if not tei_xml or not tei_xml.strip():
         return TEIParseResult([], ParsedMetadata(), False, "Empty TEI XML.")
 

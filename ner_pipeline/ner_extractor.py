@@ -40,22 +40,14 @@ def normalize_entity_text(raw_text: str) -> str:
     return text
 
 
-# ---------------------------------------------------------------------------
-# Token → span reconstruction (BIO scheme)
-# ---------------------------------------------------------------------------
+# Token - span reconstruction 
 
 def bio_tokens_to_spans(
     tokens: List[str],
     labels: List[str],
     offsets: Optional[List[Tuple[int, int]]] = None
 ) -> List[Dict[str, Any]]:
-    """
-    Convert BIO-tagged token list into entity spans.
-    Handles both B-/I- prefixed labels and plain labels.
-
-    Returns list of dicts:
-        {text, label, start_char, end_char, tokens}
-    """
+   
     spans = []
     current_tokens = []
     current_label = None
@@ -114,20 +106,15 @@ def _build_span(tokens, label, start, end):
         "tokens":     tokens,
     }
 
-
-# ---------------------------------------------------------------------------
 # Main NER runner — wraps HuggingFace pipeline
-# ---------------------------------------------------------------------------
 
 class SciBERTNERExtractor:
-    """
-    Loads the SciBERT NER model once and runs it section-by-section.
+    
+    #Loads the SciBERT NER model once and runs it section-by-section.
 
-    Model: RJuro/SciNERTopic
-      - SciBERT fine-tuned on SciERC dataset (publicly available, no auth needed)
-      - Recognises: Task, Method, Metric, Material (we map Material → dataset)
-      - ~440MB download, cached locally after first run
-    """
+    #Model: RJuro/SciNERTopic
+      #- SciBERT fine-tuned on SciERC dataset (publicly available, no auth needed)
+      #- Recognises: Task, Method, Metric, Material (we map Material → dataset)
 
     DEFAULT_MODEL = "RJuro/SciNERTopic"
     # Max tokens per chunk — SciBERT has 512 token limit
@@ -136,11 +123,7 @@ class SciBERTNERExtractor:
     STRIDE = 50
 
     def __init__(self, model_name: Optional[str] = None, device: int = -1):
-        """
-        Args:
-            model_name: HuggingFace model ID or local path.
-            device: -1 for CPU, 0 for first GPU.
-        """
+
         from transformers import pipeline, AutoTokenizer, AutoModelForTokenClassification
 
         self.model_name = model_name or self.DEFAULT_MODEL
@@ -148,13 +131,12 @@ class SciBERTNERExtractor:
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         model = AutoModelForTokenClassification.from_pretrained(self.model_name)
-
-        # aggregation_strategy="simple" reconstructs word-level spans from subword tokens
+ 
         self.pipe = pipeline(
             "ner",
             model=model,
             tokenizer=self.tokenizer,
-            aggregation_strategy="simple",
+            aggregation_strategy="simple", #reconstructs word-level spans from subword tokens
             device=device,
         )
         print(f"[NER] Model loaded on {'CPU' if device == -1 else f'GPU {device}'}")
@@ -165,11 +147,9 @@ class SciBERTNERExtractor:
         section_type: str,
         section_heading: str = "",
     ) -> List[Dict[str, Any]]:
-        """
-        Run NER on a single section. Handles long sections via sliding window.
+        
+        #NER run on a single section. Handles long sections via sliding window.
 
-        Returns list of entity dicts with provenance fields attached.
-        """
         if not section_text or not section_text.strip():
             return []
 
@@ -209,11 +189,11 @@ class SciBERTNERExtractor:
         return entities
 
     def _run_ner_windowed(self, text: str) -> List[Dict]:
-        """
-        Sliding window over long texts to stay within the 512-token limit.
-        Uses character-level splitting on sentence boundaries.
-        """
-        # Split into sentences first (simple heuristic — good enough for scientific text)
+        
+        #Sliding window over long texts to stay within the 512-token limit.
+        #Uses character-level splitting on sentence boundaries.
+        
+        # Split into sentences first (simple heuristic)
         sentences = re.split(r'(?<=[.!?])\s+', text)
 
         chunks = []
@@ -233,13 +213,12 @@ class SciBERTNERExtractor:
         if current_chunk:
             chunks.append(" ".join(current_chunk))
 
-        # Run NER on each chunk
+        # NER on each chunk
         all_results = []
         char_offset = 0
         for chunk in chunks:
             try:
                 results = self.pipe(chunk)
-                # Adjust char offsets relative to original text
                 chunk_start = text.find(chunk[:50])  # find chunk start in original
                 offset_adjust = chunk_start if chunk_start >= 0 else char_offset
                 for r in results:
@@ -256,37 +235,23 @@ class SciBERTNERExtractor:
         return all_results
 
 
-# ---------------------------------------------------------------------------
 # Section-level orchestrator
-# ---------------------------------------------------------------------------
 
 def extract_entities_from_sections(
     sections: List[Dict[str, Any]],
     extractor: SciBERTNERExtractor,
     priority_only: bool = False,
 ) -> Dict[str, Any]:
-    """
-    Run NER over all sections and return a structured entity report.
+    
+    #Run NER over all sections and return a structured entity report.
 
-    Args:
-        sections:      List of section dicts from sections.json
-                       Expected keys: section_type, heading, text
-        extractor:     Loaded SciBERTNERExtractor instance
-        priority_only: If True, only process HIGH_PRIORITY_SECTIONS
+    #Args:
+    #    sections:      List of section dicts from sections.json
+    #                   Expected keys: section_type, heading, text
+    #    extractor:     Loaded SciBERTNERExtractor instance
+    #    priority_only: If True, only process HIGH_PRIORITY_SECTIONS
 
-    Returns:
-        {
-          "entities_by_section": { section_type: [entity, ...] },
-          "entities_flat":       [ entity, ... ],   # all entities, deduplicated globally
-          "entity_index": {
-              "method":  { normalized_text: [entity, ...] },
-              "dataset": { ... },
-              "metric":  { ... },
-              "task":    { ... },
-          },
-          "section_coverage": { section_type: entity_count }
-        }
-    """
+
     entities_by_section: Dict[str, List] = {}
     all_entities: List[Dict] = []
 
@@ -315,7 +280,6 @@ def extract_entities_from_sections(
                 global_seen[key] = ent
                 all_entities.append(ent)
             else:
-                # Update provenance — entity appears in multiple sections
                 existing = global_seen[key]
                 if "also_in_sections" not in existing:
                     existing["also_in_sections"] = []

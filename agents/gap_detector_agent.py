@@ -1,46 +1,3 @@
-"""
-gap_detector_agent.py  v2.0.0
-==============================
-Person 3 — AI Agents  |  Branch: feat/agents  |  Folder: agents/
-
-v2.0.0 upgrades over v1.0.0:
-  - gap_matrix.json integration: CombinatorialGapDetector now reads
-    memory/gap_matrix.json first (produced by enricher.py). This replaces
-    brute-force combinatorial search → eliminates the 353-gap explosion.
-    Falls back to entity-based detection if gap_matrix not found.
-  - ChromaDB fix: LimitationGapDetector._cluster() now correctly filters
-    by chunk_type="limitation" only, uses embedding distance directly
-    (no Jaccard double-similarity), and calls get_collection() instead of
-    get_or_create_collection() to avoid inconsistency with indexer.py.
-  - Comparator autoload: load_comparator_context() fully implemented.
-    Scans data_1/agent_outputs/comparisons/ automatically and generates
-    CROSS_PAPER gaps from contradiction edges. No configuration needed —
-    just drop comparison JSONs in that folder and they are picked up.
-  - All existing functionality preserved: entity filtering, method
-    classification, critique-informed priority boost, LLM validation,
-    LangGraph node, Jaccard fallback.
-
-Strategies:
-  1. Combinatorial — gap_matrix.json (primary) or entity classifier (fallback)
-  2. Limitation    — ChromaDB semantic (primary) or Jaccard (fallback)
-  3. Cross-paper   — comparator contradiction edges (autoloads when available)
-
-Usage
------
-# Single paper (heuristic only)
-python agents/gap_detector_agent.py data_1/parsed/claims_output.json --no-llm --verbose
-
-# Multiple papers with LLM
-python agents/gap_detector_agent.py \\
-    data_1/parsed/paper1_enriched.json \\
-    data_1/parsed/paper2_enriched.json \\
-    --ollama-host http://localhost:11434 --verbose
-
-# With remote Ollama (ngrok)
-python agents/gap_detector_agent.py data_1/parsed/paper1_enriched.json \\
-    --ollama-host https://<ngrok>.ngrok-free.app --verbose
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -62,11 +19,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-
-# ─────────────────────────────────────────────
-#  CONFIGURATION
-# ─────────────────────────────────────────────
-
 OUTPUT_DIR      = pathlib.Path("data_1/agent_outputs/gaps")
 COMPARISONS_DIR = pathlib.Path("data_1/agent_outputs/comparisons")
 GAP_MATRIX_PATH = pathlib.Path("memory/gap_matrix.json")
@@ -87,9 +39,7 @@ LLM_MAX_RETRIES      = 3
 LLM_RETRY_BASE_DELAY = 2
 
 
-# ─────────────────────────────────────────────
 #  DATA MODELS
-# ─────────────────────────────────────────────
 
 class GapType(str, Enum):
     COMBINATORIAL = "combinatorial"
@@ -166,10 +116,6 @@ class GapResult:
         }
 
 
-# ─────────────────────────────────────────────
-#  INPUT LOADING
-# ─────────────────────────────────────────────
-
 def load_paper(path: str | pathlib.Path) -> dict:
     p = pathlib.Path(path)
     if not p.exists():
@@ -203,18 +149,10 @@ def load_paper(path: str | pathlib.Path) -> dict:
     return raw
 
 
-# ─────────────────────────────────────────────
-#  GAP MATRIX LOADER  (autoloads from memory/)
-# ─────────────────────────────────────────────
+#  GAP MATRIX LOADER
 
 def load_gap_matrix() -> dict | None:
-    """
-    Load gap_matrix.json from memory/ if it exists.
-    This file is produced by enricher.py and already ranks
-    method × dataset gaps intelligently — no brute-force needed.
 
-    Returns None if file not found (triggers fallback detection).
-    """
     if not GAP_MATRIX_PATH.exists():
         return None
     try:
@@ -224,9 +162,7 @@ def load_gap_matrix() -> dict | None:
         return None
 
 
-# ─────────────────────────────────────────────
 #  METHOD CLASSIFICATION & NORMALISATION
-# ─────────────────────────────────────────────
 
 def normalize_method(m: str) -> str:
     m = m.lower()
@@ -298,24 +234,12 @@ def extract_entity_sets(paper: dict) -> dict:
     }
 
 
-# ─────────────────────────────────────────────
-#  COMPARATOR AUTOLOADER  (fully implemented)
-# ─────────────────────────────────────────────
+#  COMPARATOR AUTOLOADER  
 
 def load_comparator_context(paper_ids: list[str]) -> dict:
-    """
-    Automatically scans data_1/agent_outputs/comparisons/ for JSON files
-    that match the paper_ids being analysed.
+    
+    #Extracts contradictions and complements. Returns populated dict when comparator output exists, empty dict otherwise.
 
-    Picks up files named like:
-        paper_a__paper_b.json   (comparator agent output format)
-
-    Extracts contradictions and complements. Returns populated dict
-    when comparator output exists, empty dict otherwise.
-
-    No configuration needed — just ensure comparator has run and
-    dropped files in the comparisons folder.
-    """
     context = {
         "contradictions": [],
         "complements":    [],
@@ -372,18 +296,13 @@ def load_comparator_context(paper_ids: list[str]) -> dict:
     return context
 
 
-# ─────────────────────────────────────────────
-#  STRATEGY 1: COMBINATORIAL GAP DETECTION
-# ─────────────────────────────────────────────
+# COMBINATORIAL GAP DETECTION
 
 class CombinatorialGapDetector:
-    """
-    Primary path: reads memory/gap_matrix.json (produced by enricher.py).
-    This file already ranks method × dataset gaps — no explosion possible.
-
-    Fallback path: entity classifier + co-occurrence matrix from paper JSON.
-    Used when gap_matrix.json doesn't exist yet.
-    """
+  
+    #This file already ranks method × dataset gaps — no explosion possible.
+    #entity classifier + co-occurrence matrix from paper JSON.
+    
 
     def __init__(self, entity_sets: list[dict], papers: list[dict], verbose: bool = False):
         self.entity_sets = entity_sets
@@ -396,7 +315,6 @@ class CombinatorialGapDetector:
             print(f"    [combinatorial] {msg}")
 
     def detect(self) -> list[Gap]:
-        """Route to gap_matrix path or fallback path."""
         gap_matrix = load_gap_matrix()
         if gap_matrix:
             self._log(f"gap_matrix.json found — using pre-computed gaps")
@@ -405,13 +323,11 @@ class CombinatorialGapDetector:
             self._log("gap_matrix.json not found — using entity-based fallback")
             return self._detect_from_entities()
 
-    # ── Primary path: gap_matrix.json ────────────────────────────────────────
-
     def _detect_from_gap_matrix(self, gap_matrix: dict) -> list[Gap]:
-        """
-        Load top N gaps from gap_matrix.json directly.
-        No combinatorial explosion — gaps are already scored and ranked.
-        """
+        
+        #Load top N gaps from gap_matrix.json directly.
+        #No combinatorial explosion — gaps are already scored and ranked.
+        
         gaps: list[Gap] = []
         paper_id_set = {es["paper_id"] for es in self.entity_sets}
 
@@ -430,7 +346,7 @@ class CombinatorialGapDetector:
                 (set(method_in) | set(dataset_in)) & paper_id_set
             )
             if not involved:
-                involved = list(paper_id_set)  # fallback: attribute to all
+                involved = list(paper_id_set)
 
             priority = (
                 GapPriority.HIGH   if gap_score >= 4
@@ -464,7 +380,7 @@ class CombinatorialGapDetector:
         self._log(f"Loaded {len(gaps)} combinatorial gaps from gap_matrix")
         return gaps
 
-    # ── Fallback path: entity-based detection ────────────────────────────────
+    # Fallback path: entity-based detection
 
     def _all_datasets(self) -> Counter:
         c = Counter()
@@ -485,7 +401,7 @@ class CombinatorialGapDetector:
         return c
 
     def _method_dataset_cooccurrence(self) -> dict[str, set[str]]:
-        """method → datasets it ACTUALLY co-occurs with in claims (not just present)."""
+        #method → datasets it ACTUALLY co-occurs with in claims.
         cooc: dict[str, set[str]] = defaultdict(set)
         for es, paper in zip(self.entity_sets, self.papers):
             for claim in paper.get("claims", []):
@@ -618,20 +534,17 @@ class CombinatorialGapDetector:
         return gaps
 
 
-# ─────────────────────────────────────────────
-#  STRATEGY 2: LIMITATION-BASED GAP DETECTION
-# ─────────────────────────────────────────────
+#  LIMITATION-BASED GAP DETECTION
 
 class LimitationGapDetector:
-    """
-    Primary path: ChromaDB semantic clustering.
-      - Queries ONLY chunk_type="limitation" (not claims or findings)
-      - Uses embedding cosine distance directly — NO Jaccard double-similarity
-      - Uses get_collection() not get_or_create_collection()
+    
+    #Primary path: ChromaDB semantic clustering.
+    #  - Queries ONLY chunk_type="limitation" (not claims or findings)
+    #  - Uses embedding cosine distance directly — NO Jaccard double-similarity
+    #  - Uses get_collection() not get_or_create_collection()
 
-    Fallback path: Jaccard token-overlap clustering.
-    Used when ChromaDB is unavailable or empty.
-    """
+    #Fallback path: Jaccard token-overlap clustering.
+    
 
     def __init__(self, papers: list[dict], entity_sets: list[dict], verbose: bool = False):
         self.papers      = papers
@@ -685,16 +598,9 @@ class LimitationGapDetector:
         return all_lims
 
     def _cluster(self, limitations: list[dict]) -> list[list[dict]]:
-        """
-        ChromaDB semantic clustering — correct implementation.
+        
+        #ChromaDB semantic clustering 
 
-        Fixes vs old version:
-          ✅ Filters chunk_type="limitation" only (not claims/findings)
-          ✅ Uses embedding distance directly — Jaccard removed
-          ✅ Uses get_collection() not get_or_create_collection()
-          ✅ Includes metadatas to enable paper_id cross-paper filtering
-          ✅ Falls back to Jaccard if ChromaDB unavailable
-        """
         if not limitations:
             return []
 
@@ -703,7 +609,6 @@ class LimitationGapDetector:
             from sentence_transformers import SentenceTransformer
 
             client     = chromadb.PersistentClient(path=CHROMA_STORE_PATH)
-            # ✅ Use get_collection — indexer.py already created this
             collection = client.get_collection(CHROMA_COLLECTION)
 
             if collection.count() == 0:
@@ -724,7 +629,7 @@ class LimitationGapDetector:
                     normalize_embeddings=True,
                 ).tolist()
 
-                # ✅ CRITICAL: filter chunk_type="limitation" ONLY
+                # filter chunk_type="limitation" ONLY
                 # Optional cross-paper filter — uncomment to avoid self-clustering:
                 # where={"$and": [
                 #     {"chunk_type": "limitation"},
@@ -740,7 +645,7 @@ class LimitationGapDetector:
                 cluster   = [lim]
                 assigned[i] = True
 
-                # ✅ Use embedding distance ONLY — no Jaccard double-similarity
+                # Use embedding distance — no Jaccard double-similarity
                 for dist, meta, doc in zip(
                     results["distances"][0],
                     results["metadatas"][0],
@@ -756,7 +661,7 @@ class LimitationGapDetector:
                     for j, other in enumerate(limitations):
                         if assigned[j]:
                             continue
-                        # Exact text match to map DB doc → local lim
+                        # Exact text match to map DB doc - local lim
                         if other["text"].strip().lower() == doc.strip().lower():
                             cluster.append(other)
                             assigned[j] = True
@@ -888,31 +793,27 @@ class LimitationGapDetector:
         return gaps
 
 
-# ─────────────────────────────────────────────
-#  STRATEGY 3: CROSS-PAPER GAPS (from comparator)
-# ─────────────────────────────────────────────
+#  CROSS-PAPER GAPS (from comparator)
 
 def detect_cross_paper_gaps(
     comp_ctx: dict,
     entity_sets: list[dict],
     verbose: bool = False,
 ) -> list[Gap]:
-    """
-    Generates CROSS_PAPER gaps from comparator contradiction edges.
 
-    Logic: if Method A contradicts Method B on a certain claim,
-    and neither paper tested Method A on B's datasets, that is
-    an unresolved cross-paper gap worth flagging.
+    #Generates CROSS_PAPER gaps from comparator contradiction edges.
 
-    Autoloads — called only when comp_ctx["available"] is True.
-    """
+    #Logic: if Method A contradicts Method B on a certain claim,
+    #and neither paper tested Method A on B's datasets, that is
+    #an unresolved cross-paper gap worth flagging.
+
     if not comp_ctx["available"]:
         return []
 
     gaps:  list[Gap] = []
     seen:  set       = set()
 
-    # Build paper → datasets lookup
+    # Build paper - datasets lookup
     paper_datasets = {
         es["paper_id"]: es["datasets"]
         for es in entity_sets
@@ -965,10 +866,7 @@ def detect_cross_paper_gaps(
 
     return gaps
 
-
-# ─────────────────────────────────────────────
-#  CRITIQUE-INFORMED PRIORITY BOOST
-# ─────────────────────────────────────────────
+#  CRITIQUE-INFORMED PRIORITY 
 
 def boost_priority_from_critiques(gaps: list[Gap], papers: list[dict]) -> list[Gap]:
     critique_index: dict[str, list[str]] = {}
@@ -1000,11 +898,6 @@ def boost_priority_from_critiques(gaps: list[Gap], papers: list[dict]) -> list[G
 
     return gaps
 
-
-# ─────────────────────────────────────────────
-#  LLM CALL HELPER
-# ─────────────────────────────────────────────
-
 def _llm_call_raw(prompt: str, llm_backend: str) -> str:
     host  = os.environ.get("OLLAMA_HOST", OLLAMA_HOST)
     last_error = None
@@ -1033,10 +926,9 @@ def _llm_call_raw(prompt: str, llm_backend: str) -> str:
             resp.raise_for_status()
             data = resp.json()
 
-            # Ollama /api/chat response format
             if "message" in data:
                 return data["message"]["content"]
-            # Fallback: /api/generate format
+    
             if "response" in data:
                 return data["response"]
             raise ValueError(f"Unexpected Ollama response: {list(data.keys())}")
@@ -1138,7 +1030,7 @@ def llm_validate_gaps(
         try:
             parsed = _parse_llm_json(text)
         except Exception:
-            print("⚠️ LLM JSON parsing failed, retrying once...")
+            print(" LLM JSON parsing failed, retrying once...")
             text   = _llm_call_raw(prompt, llm_backend)
             parsed = _parse_llm_json(text)
 
@@ -1182,13 +1074,11 @@ def llm_validate_gaps(
         return validated
 
     except Exception as e:
-        print(f"\n⚠️ LLM validation failed: {e}\n   → Using heuristic gaps")
+        print(f"\n LLM validation failed: {e}\n   → Using heuristic gaps")
         return gaps
 
 
-# ─────────────────────────────────────────────
 #  REACT AGENT
-# ─────────────────────────────────────────────
 
 class GapDetectorAgent:
     VERSION = "2.0.0"
@@ -1214,14 +1104,8 @@ class GapDetectorAgent:
         if self.verbose: print(f"  {entry}")
 
     def run_session(self, session_state: dict) -> dict:
-        """
-        MATCHES COMPARATOR/CRITIC STYLE:
-        Takes the full session state, finds the right paper paths,
-        runs detection, and returns a summary report.
-        """
         self._think("Starting Gap Detection Session")
-        
-        # 1. Self-Discovery of Paper Paths
+      
         rr = session_state.get("reader_report", {})
         paper_ids = rr.get("paper_ids_read", [])
         memory_dir = pathlib.Path(session_state.get("memory_dir", "memory"))
@@ -1233,7 +1117,7 @@ class GapDetectorAgent:
 
         resolved_paths = []
         for pid in paper_ids:
-            # CRITICAL: Prefer enriched JSON from Critic so we get the priority boost!
+            # Prefer enriched JSON from Critic 
             enriched = memory_dir / pid / f"{pid}_enriched.json"
             raw = memory_dir / pid / "claims_output.json"
             
@@ -1247,23 +1131,22 @@ class GapDetectorAgent:
 
         self._observe(f"Analyzing {len(resolved_paths)} paper(s) for research gaps.")
 
-        # 2. Run the internal detection logic
         try:
-            # We pass the list of paths to the existing run() method
+
             result = self.run(resolved_paths)
             
-            # 3. Internal Write-back (Shared Memory)
+            # Internal Write-back (Shared Memory)
             out_path = save_gaps(result, OUTPUT_DIR)
             self._observe(f"Gaps saved to {out_path.name}")
             
             return self._build_session_report(result)
             
         except Exception as e:
-            self._observe(f"⚠ Gap Detection crashed: {e}")
+            self._observe(f" Gap Detection crashed: {e}")
             return self._build_session_report(None)
 
     def _build_session_report(self, result: GapResult | None) -> dict:
-        """Builds the dictionary the Planner expects."""
+        #Builds the dictionary the Planner expects.
         if not result:
             return {
                 "agent": "gap_detector_agent",
@@ -1304,7 +1187,7 @@ class GapDetectorAgent:
             react_trace   = self.trace,
         )
 
-        # Step 0: Load papers
+        # Load papers
         self._think(f"Loading {len(paper_paths)} paper file(s)")
         papers: list[dict] = []
         for path in paper_paths:
@@ -1326,7 +1209,7 @@ class GapDetectorAgent:
         result.papers_analysed = [p["paper_id"] for p in papers]
         result.n_papers        = len(papers)
 
-        # Step 1: Comparator context (fully autoloads)
+        # Comparator context 
         self._think("Checking for comparator output in comparisons/")
         self._act("load_comparator_context()")
         comp_ctx = load_comparator_context(result.papers_analysed)
@@ -1338,7 +1221,7 @@ class GapDetectorAgent:
                else " [Place comparison JSONs in data_1/agent_outputs/comparisons/ to enable]")
         )
 
-        # Step 2: Extract entity sets
+        # Extract entity sets
         self._think("Extracting entity sets")
         self._act("extract_entity_sets() for all papers")
         entity_sets = [extract_entity_sets(p) for p in papers]
@@ -1350,7 +1233,7 @@ class GapDetectorAgent:
                 f"{len(es['tasks'])} tasks"
             )
 
-        # Step 3: Strategy 1 — Combinatorial (gap_matrix or fallback)
+        # Combinatorial 
         self._think("Strategy 1: Combinatorial gaps")
         self._act("CombinatorialGapDetector.detect()")
         comb_detector = CombinatorialGapDetector(entity_sets, papers, verbose=self.verbose)
@@ -1358,7 +1241,7 @@ class GapDetectorAgent:
         result.gaps.extend(comb_gaps)
         self._observe(f"Combinatorial gaps: {len(comb_gaps)} found")
 
-        # Step 4: Strategy 2 — Limitation (ChromaDB or Jaccard fallback)
+        # Limitation (ChromaDB or Jaccard fallback)
         self._think("Strategy 2: Limitation-based gaps")
         self._act("LimitationGapDetector.detect()")
         lim_detector = LimitationGapDetector(papers, entity_sets, verbose=self.verbose)
@@ -1366,14 +1249,14 @@ class GapDetectorAgent:
         result.gaps.extend(lim_gaps)
         self._observe(f"Limitation gaps: {len(lim_gaps)} found")
 
-        # Step 5: Strategy 3 — Cross-paper (from comparator, if available)
+        # Cross-paper (from comparator)
         self._think("Strategy 3: Cross-paper gaps from comparator")
         self._act("detect_cross_paper_gaps()")
         cross_gaps = detect_cross_paper_gaps(comp_ctx, entity_sets, verbose=self.verbose)
         result.gaps.extend(cross_gaps)
         self._observe(f"Cross-paper gaps: {len(cross_gaps)} found")
 
-        # Step 6: Critique-informed priority boost
+        # Critique-informed priority boost
         self._think("Boosting gap priority from critic signals")
         self._act("boost_priority_from_critiques()")
         result.gaps = boost_priority_from_critiques(result.gaps, papers)
@@ -1382,7 +1265,7 @@ class GapDetectorAgent:
             f"After boost: {len(result.gaps)} total, {high_count} HIGH"
         )
 
-        # Step 7: LLM validation
+        # LLM validation
         self._think(f"LLM backend: '{self.llm_backend}'")
 
         if self.llm_backend == "ollama" and result.gaps:
@@ -1396,7 +1279,7 @@ class GapDetectorAgent:
         else:
             self._think("No LLM — heuristic gaps only")
 
-        # Step 8: Sort and cap
+        # Sort and cap
         self._think("Sorting by priority and confidence")
         priority_order = {GapPriority.HIGH: 0, GapPriority.MEDIUM: 1, GapPriority.LOW: 2}
         result.gaps.sort(key=lambda g: (priority_order[g.priority], -g.confidence))
@@ -1412,7 +1295,7 @@ class GapDetectorAgent:
         return result
 
     def as_langgraph_node(self):
-        """LangGraph node wrapper — returns a node_fn for use in the planner graph."""
+        #LangGraph node wrapper — returns a node_fn for use in the planner graph.
         agent = self
 
         def node_fn(state: dict) -> dict:
@@ -1456,10 +1339,7 @@ class GapDetectorAgent:
         return node_fn
 
 
-# ─────────────────────────────────────────────
 #  OUTPUT WRITERS
-# ─────────────────────────────────────────────
-
 def save_gaps(result: GapResult, output_dir: pathlib.Path) -> pathlib.Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"session_{result.session_id}_gaps.json"
@@ -1519,11 +1399,6 @@ def print_summary(result: GapResult):
                 print(f"     LLM note  : {g.llm_rationale[:100]}")
 
     print("\n" + "═" * 64)
-
-
-# ─────────────────────────────────────────────
-#  CLI
-# ─────────────────────────────────────────────
 
 def _ollama_is_reachable() -> bool:
     try:
@@ -1604,7 +1479,7 @@ Examples:
 
     print_summary(result)
     out_path = save_gaps(result, pathlib.Path(args.output_dir))
-    print(f"\n  ✅ Saved to: {out_path}\n")
+    print(f"\n  Saved to: {out_path}\n")
 
 
 if __name__ == "__main__":

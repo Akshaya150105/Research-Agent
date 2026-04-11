@@ -54,7 +54,6 @@ Examples:
 
     args = parser.parse_args()
 
-    # Resolve Ollama host: CLI arg > env var > default
     ollama_host = (
         args.ollama_host
         or os.environ.get("OLLAMA_HOST", "http://localhost:11434")

@@ -1,6 +1,4 @@
 """
-enricher.py
------------
 Runs after ALL papers are indexed. Performs three passes that
 transform isolated per-paper chunks into a connected cross-paper
 knowledge base.
@@ -39,23 +37,18 @@ MEMORY_DIR = Path("memory")
 
 
 def _normalize_entity_text(text: str) -> str:
-    """
-    Light normalization for entity matching across papers.
-    Lowercase + strip — enough for exact dedup.
-    Fuzzy matching (RapidFuzz) is your friend's job in the KG layer.
-    """
+    #Light normalization for entity matching across papers.
+   
     return text.strip().lower()
 
 
 
 def run_all_passes() -> dict:
-    """
-    Runs all three enrichment passes in order.
-    Returns a summary dict with counts from each pass.
-
-    Call this after all papers are indexed.
-    Safe to call multiple times — each pass overwrites its outputs.
-    """
+    
+    #Runs all three enrichment passes in order.
+    #Returns a summary dict with counts from each pass.
+    #Called after all papers are indexed.
+   
     from rag.indexer import get_collections, collection_counts
 
     counts = collection_counts()

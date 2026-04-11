@@ -1,35 +1,3 @@
-"""
-kg_population.py  v2.1.0
-=========================
-Phase 2 — Knowledge Graph Population
-
-CHANGES FROM v2.0.0:
-  - Imports schema from shared_schema.py instead of defining its own.
-    This eliminates the mismatch where reader and KG had different
-    entities table structures.
-
-  - entities table is now the KG-canonical format:
-      entity_id = "method::long short-term memory"
-      canonical_text, raw_variants (JSON), papers_seen_in (JSON)
-    Reader no longer writes to entities directly — it calls kg_population
-    via subprocess, which owns entity writes.
-
-  - papers table now has all reader columns (doi, source_path, n_claims,
-    etc.) via shared_schema. KG writes only its own fields (paper_id,
-    title, authors, year, venue, doi, abstract) using INSERT OR IGNORE so
-    it never overwrites reader's richer fields.
-
-  - session_log INSERT now includes detail column (KG logs go here) and
-    leaves input_summary/output_summary empty (reader's fields).
-
-Usage (unchanged):
-  python kg_population/kg_population.py \\
-      --inputs memory/paper1/claims_output.json \\
-      --db shared_memory/research.db \\
-      --gexf shared_memory/knowledge_graph.gexf \\
-      --ollama-host https://<ngrok>.ngrok-free.app
-"""
-
 import argparse
 import json
 import os
@@ -53,19 +21,15 @@ if str(_PROJECT_ROOT) not in sys.path:
 from shared_schema import FULL_SCHEMA, ensure_schema, EDGE_TYPE_MAP
 
 
-# ─────────────────────────────────────────────────────────────
-#  NORMALISATION (Tier-1)
-# ─────────────────────────────────────────────────────────────
+#  NORMALISATION 
 
 _PUNCT_TABLE = str.maketrans("", "", string.punctuation.replace("-", ""))
 
 
 def normalize_entity_text(raw: str) -> str:
-    """
-    Tier-1 normalisation: unicode NFC → lowercase → strip punctuation
-    (keep hyphens) → collapse whitespace.
-    Returns the canonical lookup key used in entity_id.
-    """
+    
+    #Tier-1 normalisation: unicode NFC -> lowercase -> strip punctuation
+   
     text = unicodedata.normalize("NFC", raw)
     text = text.lower()
     text = text.translate(_PUNCT_TABLE)
@@ -73,9 +37,7 @@ def normalize_entity_text(raw: str) -> str:
     return text
 
 
-# ─────────────────────────────────────────────────────────────
 #  LLM ENTITY CLUSTERING (Tier-2, Ollama)
-# ─────────────────────────────────────────────────────────────
 
 CLUSTER_PROMPT = """You are a scientific entity deduplication assistant for NLP/ML research papers.
 
@@ -217,10 +179,7 @@ def build_merge_maps(
 
     return merge_maps
 
-
-# ─────────────────────────────────────────────────────────────
 #  KNOWLEDGE GRAPH BUILDER
-# ─────────────────────────────────────────────────────────────
 
 class KnowledgeGraphBuilder:
 
@@ -240,9 +199,7 @@ class KnowledgeGraphBuilder:
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
 
-        # ── USE UNIFIED SCHEMA ───────────────────────────────
-        # This is the only place the schema is created/migrated.
-        # Both reader_agent.py and kg_population.py call this same function.
+        #unified schema used
         ensure_schema(self.conn)
 
         if self.gexf_path.exists():
@@ -261,7 +218,7 @@ class KnowledgeGraphBuilder:
         self._warm_cache()
 
     def _warm_cache(self) -> None:
-        """Load all existing entity_ids from DB into memory for fast lookup."""
+        #all existing entity_ids loaded from DB into memory for fast lookup.
         cur = self.conn.execute("SELECT entity_id, entity_type FROM entities")
         for row in cur:
             etype = row["entity_type"]
@@ -281,7 +238,6 @@ class KnowledgeGraphBuilder:
         self.conn.commit()
         print(f"[{agent}] {action}: {detail}")
 
-    # ── Main ingestion ────────────────────────────────────────
 
     def ingest_paper(self, json_path: str) -> str:
         with open(json_path, encoding="utf-8") as f:
@@ -292,9 +248,7 @@ class KnowledgeGraphBuilder:
 
         meta = data.get("metadata", {})
 
-        # ── Step 1: Paper metadata ────────────────────────────
-        # INSERT OR IGNORE so we never overwrite reader's richer fields
-        # (source_path, n_claims, coverage_gain, action, etc.)
+        # Paper metadata ─ INSERT OR IGNORE so we never overwrite reader's richer fields
         self.conn.execute(
             """INSERT OR IGNORE INTO papers
                (paper_id, title, authors, year, venue, doi, abstract)
@@ -320,7 +274,7 @@ class KnowledgeGraphBuilder:
                 venue=meta.get("venue", ""),
             )
 
-        # ── Steps 2 & 3: Entities + typed edges ───────────────
+        # Entities + typed edges 
         entity_index = data.get("entity_index", {})
         for etype, entities_dict in entity_index.items():
             if etype not in EDGE_TYPE_MAP:
@@ -348,7 +302,7 @@ class KnowledgeGraphBuilder:
                     confidence = best_mention.get("confidence", 1.0),
                 )
 
-        # ── Step 4a: Limitation statements ───────────────────
+        # Limitation statements
         for idx, lim in enumerate(data.get("limitations", [])):
             stmt_id = f"{paper_id}::lim::{idx}"
             self.conn.execute(
@@ -369,7 +323,7 @@ class KnowledgeGraphBuilder:
             if not self.graph.has_edge(paper_id, stmt_id):
                 self.graph.add_edge(paper_id, stmt_id, edge_type="has_limitation")
 
-        # ── Step 4b: Future work statements ──────────────────
+        #  Future work statements 
         for idx, fw in enumerate(data.get("future_work", [])):
             stmt_id = f"{paper_id}::fw::{idx}"
             self.conn.execute(
@@ -390,7 +344,7 @@ class KnowledgeGraphBuilder:
             if not self.graph.has_edge(paper_id, stmt_id):
                 self.graph.add_edge(paper_id, stmt_id, edge_type="has_future_work")
 
-        # ── Step 4c: Claims ───────────────────────────────────
+        #  Claims 
         for idx, claim in enumerate(data.get("claims", [])):
             claim_id = f"{paper_id}::claim::{idx}"
             self.conn.execute(
@@ -421,7 +375,7 @@ class KnowledgeGraphBuilder:
         )
         return paper_id
 
-    # ── Entity resolution ─────────────────────────────────────
+    #  Entity resolution
 
     def _resolve_entity(
         self,
@@ -430,13 +384,11 @@ class KnowledgeGraphBuilder:
         entity_type:    str,
         paper_id:       str,
     ) -> str:
-        """
-        Map raw_text to a canonical entity_id.
-        entity_id = "{entity_type}::{normalize(canonical_text)}"
-
-        If the entity already exists, just add this raw_text as a variant
-        and add paper_id to papers_seen_in. Otherwise create new entity.
-        """
+        
+        #Map raw_text to a canonical entity_id.
+        #If the entity already exists, just add this raw_text as a variant
+        #and add paper_id to papers_seen_in. Otherwise create new entity.
+        
         canonical_key = normalize_entity_text(canonical_text)
         entity_id     = f"{entity_type}::{canonical_key}"
 
@@ -510,7 +462,7 @@ class KnowledgeGraphBuilder:
                                 section=section,
                                 confidence=confidence)
 
-    # ── Graph I/O ─────────────────────────────────────────────
+    # Graph I/O 
 
     def save_gexf(self) -> None:
         nx.write_gexf(self.graph, str(self.gexf_path))
@@ -522,7 +474,6 @@ class KnowledgeGraphBuilder:
         self.save_gexf()
         self.conn.close()
 
-    # ── Query helpers (for downstream agents) ─────────────────
 
     def papers_using_method(self, method_text: str) -> list:
         entity_id = f"method::{normalize_entity_text(method_text)}"
@@ -561,9 +512,6 @@ class KnowledgeGraphBuilder:
         return {"node_counts": node_counts, "edge_counts": edge_counts}
 
 
-# ─────────────────────────────────────────────────────────────
-#  CLI
-# ─────────────────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -584,10 +532,10 @@ def main() -> None:
     else:
         print(f"[KGBuilder] Ollama host: {ollama_host}")
 
-    # Step 1: Build merge maps via LLM clustering
+    #  merge maps built via LLM clustering
     merge_maps = build_merge_maps(args.inputs, ollama_host)
 
-    # Step 2: Ingest all papers
+    # all papers ingested
     builder = KnowledgeGraphBuilder(
         db_path    = args.db,
         gexf_path  = args.gexf,

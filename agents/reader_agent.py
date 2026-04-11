@@ -1,71 +1,3 @@
-"""
-reader_agent.py  v2.0.0
-========================
-Person 3 — AI Agents  |  Branch: feat/agents  |  Folder: agents/
-
-WHAT CHANGED FROM v1.1.0:
---------------------------
-The reader now does the FULL extraction pipeline for each new PDF before
-deciding read/skip. Previously it only scanned memory/ for already-processed
-claims_output.json files — meaning you had to run GROBID, NER, and the
-claim extractor manually on the command line before the reader could do anything.
-
-Now the reader owns the full flow:
-
-  For each PDF in papers_dir/ (default: Data/):
-    1. Check if memory/{paper_folder}/claims_output.json already exists.
-       If yes → skip extraction (already processed), go straight to step 5.
-    2. Run GROBID parser → memory/{paper_folder}/sections.json
-    3. Run SciBERT NER  → memory/{paper_folder}/enriched_entities.json
-    4. Run LLM Claim Extractor (Ollama qwen2.5) → memory/{paper_folder}/claims_output.json
-    5. Compute coverage_gain from claims_output.json entities vs what's already in DB.
-    6. Read-or-skip decision based on coverage_gain threshold.
-    7. Write paper record + entities to SQLite.
-
-CLAIM EXTRACTOR CHANGE:
-  Old command used --api-key (Gemini backend).
-  New command uses --ollama-host (Ollama/qwen2.5 backend):
-    python -m claim_extractor.cli \\
-        --grobid-dir memory/{folder}/ \\
-        --ner-dir memory/{folder}/ \\
-        --ollama-host http://localhost:11434
-
-PDF FOLDER NAMING:
-  PDFs are placed in papers_dir/ (default: Data/).
-  Each PDF gets its own subfolder in memory/:
-    Data/attention_is_all_you_need.pdf
-      → memory/attention_is_all_you_need_2023/
-         ├── sections.json          (GROBID output)
-         ├── enriched_entities.json (NER output)
-         └── claims_output.json     (LLM claim extractor output)
-
-  The folder name is derived from the PDF filename (no extension).
-  If GROBID extracts a year from the paper, it's appended: {name}_{year}.
-
-WHAT THE READER DOES NOT DO:
-  The reader does NOT run GROBID docker itself — it calls the CLI
-  via subprocess. You must have GROBID running on port 8070:
-    docker run --rm --init -p 8070:8070 lfoppiano/grobid:0.8.0
-
-  If GROBID is not reachable, extraction is skipped for that paper
-  and the reader logs a warning. The paper is not added to the DB.
-
-Usage (standalone):
-  python agents/reader_agent.py --papers-dir Data/ --verbose
-  python agents/reader_agent.py --papers-dir Data/ --no-extraction --verbose
-  python agents/reader_agent.py --papers-dir Data/ --ollama-host http://localhost:11434 --verbose
-
-Usage (from Planner / LangGraph):
-  from reader_agent import ReaderAgent
-  agent = ReaderAgent(verbose=True)
-  updated_state = agent.run(state)
-  # state can include:
-  #   papers_dir    (str) — where raw PDFs live, default "Data"
-  #   memory_dir    (str) — where output folders go, default "memory"
-  #   ollama_host   (str) — Ollama URL, default "http://localhost:11434"
-  #   no_extraction (bool)— if True, skip pipeline, only scan existing JSONs
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -87,7 +19,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from entity_resolver import get_typed_entities
 
-# ── defaults ──────────────────────────────────────────────────
 PAPERS_DIR              = pathlib.Path("Data")
 MEMORY_DIR              = pathlib.Path("memory")
 SHARED_MEMORY           = pathlib.Path("shared_memory")
@@ -96,10 +27,6 @@ COVERAGE_GAIN_THRESHOLD = 0.10
 DEFAULT_OLLAMA_HOST     = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 GROBID_URL              = "http://localhost:8070"
 
-
-# ─────────────────────────────────────────────────────────────
-#  DATA MODELS
-# ─────────────────────────────────────────────────────────────
 
 @dataclass
 class PaperRecord:
@@ -124,12 +51,12 @@ class ReaderReport:
     agent_version:        str   = "2.0.0"
     session_id:           str   = ""
     papers_found:         int   = 0
-    papers_extracted:     int   = 0   # new: ran the full pipeline
-    papers_skipped_extract: int = 0   # new: already had claims_output.json
+    papers_extracted:     int   = 0   
+    papers_skipped_extract: int = 0   
     papers_read:          int   = 0
     papers_skipped:       int   = 0
     papers_already_in_db: int   = 0
-    extraction_failed:    int   = 0   # new: pipeline failed for this paper
+    extraction_failed:    int   = 0   
     new_methods:          int   = 0
     new_datasets:         int   = 0
     new_metrics:          int   = 0
@@ -138,46 +65,28 @@ class ReaderReport:
     react_trace:          list  = field(default_factory=list)
 
 
-# ─────────────────────────────────────────────────────────────
 #  DB SCHEMA — single source of truth in shared_schema.py
-#
-#  The reader used to define its own entities table with:
-#    entity_id (UUID PK), paper_id (FK), text, text_norm, entity_type...
-#  KG used its own entities table with:
-#    entity_id ("method::lstm"), entity_type, canonical_text, raw_variants...
-#
-#  When both ran on the same DB they always crashed on each other's schema.
-#  Fix: import ensure_schema from shared_schema — one unified schema for both.
-# ─────────────────────────────────────────────────────────────
 
 from shared_schema import ensure_schema as _ensure_schema
 
-
-# ─────────────────────────────────────────────────────────────
 #  EXTRACTION PIPELINE RUNNER
-#  Wraps the 4 CLI commands as subprocess calls.
 #  Each step checks if its output already exists before running.
-# ─────────────────────────────────────────────────────────────
+
 
 class ExtractionPipeline:
-    """
-    Runs GROBID → NER → Claim Extractor → KG Population for one PDF.
+   
+    #Runs GROBID → NER → Claim Extractor → KG Population for one PDF.
+    # if its output file already exists, it is skipped. 
 
-    Each step is idempotent: if its output file already exists,
-    it is skipped. This means re-running the reader on the same
-    paper set is safe and fast.
+    #Subprocess approach:
+    #  existing CLI entry points called via subprocess rather than
+    #  importing the modules directly. 
 
-    Subprocess approach:
-      We call the existing CLI entry points via subprocess rather than
-      importing the modules directly. This keeps the reader decoupled from
-      Person 1's and 2's code — they can change their internals without
-      breaking the reader, as long as the CLI interface stays the same.
-
-    Error handling:
-      If any step fails (non-zero return code or exception), the pipeline
-      stops for that paper and returns False. The paper is not added to the DB.
-      The failure is logged to the react trace.
-    """
+    #Error handling:
+    #  If any step fails (non-zero return code or exception), the pipeline
+    #  stops for that paper and returns False. The paper is not added to the DB.
+    #  The failure is logged to the react trace.
+    
 
     def __init__(
         self,
@@ -195,7 +104,6 @@ class ExtractionPipeline:
         self.gexf_path   = gexf_path
         self.verbose     = verbose
 
-        # Output folder name = PDF filename without extension
         self.folder_name = pdf_path.stem
         self.output_dir  = memory_dir / self.folder_name
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -213,10 +121,7 @@ class ExtractionPipeline:
         return self.output_dir / "claims_output.json"
 
     def _run_cmd(self, cmd: list[str], step_name: str) -> bool:
-        """
-        Run a subprocess command. Returns True on success, False on failure.
-        Prints stdout/stderr if verbose.
-        """
+        
         if self.verbose:
             print(f"    [pipeline:{step_name}] Running: {' '.join(str(c) for c in cmd)}")
 
@@ -225,7 +130,7 @@ class ExtractionPipeline:
                 cmd,
                 capture_output=not self.verbose,
                 text=True,
-                cwd=str(_PROJECT_ROOT),   # run from project root so module paths resolve
+                cwd=str(_PROJECT_ROOT),   
             )
             if result.returncode != 0:
                 print(
@@ -233,7 +138,6 @@ class ExtractionPipeline:
                     file=sys.stderr,
                 )
                 if result.stderr and not self.verbose:
-                    # Always show first 300 chars of stderr on failure even in quiet mode
                     print(f"    stderr: {result.stderr[:300]}", file=sys.stderr)
                 return False
 
@@ -249,21 +153,12 @@ class ExtractionPipeline:
             return False
 
     def run(self) -> bool:
-        """
-        Run all 4 steps. Returns True if claims_output.json exists at the end.
 
-        Steps:
-          1. GROBID parser   → sections.json
-          2. SciBERT NER     → enriched_entities.json
-          3. Claim extractor → claims_output.json  (uses Ollama)
-          4. KG population   → research.db + knowledge_graph.gexf
+        #Each step is skipped if its output already exists.
+        #(KG) is run even if claims_output.json already existed —
 
-        Each step is skipped if its output already exists.
-        Step 4 (KG) is run even if claims_output.json already existed —
-        it's idempotent and ensures the graph stays current.
-        """
 
-        # ── Step 1: GROBID ────────────────────────────────────
+        # GROBID
         if self.sections_json.exists():
             if self.verbose:
                 print(f"    [pipeline:grobid] Skipping — {self.sections_json.name} exists")
@@ -285,7 +180,7 @@ class ExtractionPipeline:
                 )
                 return False
 
-        # ── Step 2: SciBERT NER ───────────────────────────────
+        # SciBERT NER
         if self.enriched_entities_json.exists():
             if self.verbose:
                 print(f"    [pipeline:ner] Skipping — {self.enriched_entities_json.name} exists")
@@ -299,12 +194,12 @@ class ExtractionPipeline:
             )
             if not ok or not self.enriched_entities_json.exists():
                 print(
-                    f"    [pipeline] ⚠ NER failed for '{self.pdf_path.name}'.",
+                    f"    [pipeline]  NER failed for '{self.pdf_path.name}'.",
                     file=sys.stderr,
                 )
                 return False
 
-        # ── Step 3: LLM Claim Extractor (Ollama) ─────────────
+        #  LLM Claim Extractor (Ollama)
         if self.claims_output_json.exists():
             if self.verbose:
                 print(f"    [pipeline:claims] Skipping — {self.claims_output_json.name} exists")
@@ -326,14 +221,9 @@ class ExtractionPipeline:
                 )
                 return False
 
-        # ── Step 4: KG Population ─────────────────────────────
-        # Always run — idempotent (INSERT OR IGNORE/REPLACE).
-        # Pass --ollama-host so KG can also do LLM entity clustering.
-        # KG failure is non-fatal — claims_output.json is still usable
-        # and the reader can still do coverage_gain + papers table write.
+        #KG Population 
         kg_script = _PROJECT_ROOT / "kg_population" / "kg_population.py"
         if not kg_script.exists():
-            # Try alternate location (project root level)
             kg_script = _PROJECT_ROOT / "kg_population.py"
 
         kg_cmd = [
@@ -352,10 +242,6 @@ class ExtractionPipeline:
         return self.claims_output_json.exists()
 
 
-# ─────────────────────────────────────────────────────────────
-#  DB HELPERS
-# ─────────────────────────────────────────────────────────────
-
 def _already_processed(paper_id: str, conn: sqlite3.Connection) -> bool:
     return conn.execute(
         "SELECT 1 FROM papers WHERE paper_id = ?", (paper_id,)
@@ -363,16 +249,10 @@ def _already_processed(paper_id: str, conn: sqlite3.Connection) -> bool:
 
 
 def _known_entities(conn: sqlite3.Connection) -> dict[str, set]:
-    """
-    Return all known canonical entity keys per type from the DB.
-    Used to compute coverage_gain for each new paper.
+   
+    #Return all known canonical entity keys per type from the DB.
+    #Used to compute coverage_gain for each new paper.
 
-    SCHEMA FIX: The old reader queried entities.text_norm (its own schema).
-    The KG schema has no text_norm — it uses canonical_text and entity_type.
-    We derive a normalised key from canonical_text using the same logic
-    as normalize_entity_text() in kg_population: lowercase + strip punct.
-    This means coverage_gain uses the same canonical keys the KG uses.
-    """
     import re as _re
     import string as _string
     import unicodedata as _unicodedata
@@ -389,7 +269,7 @@ def _known_entities(conn: sqlite3.Connection) -> dict[str, set]:
         "metric": set(), "task":    set(),
     }
 
-    # Try KG schema first (canonical_text column)
+    # KG schema tried first 
     try:
         for canonical_text, etype in conn.execute(
             "SELECT canonical_text, entity_type FROM entities"
@@ -400,7 +280,7 @@ def _known_entities(conn: sqlite3.Connection) -> dict[str, set]:
     except sqlite3.OperationalError:
         pass
 
-    # Fallback: old reader schema (text_norm column) — for transitional DBs
+    # Fallback: old reader schema 
     try:
         for text_norm, etype in conn.execute(
             "SELECT text_norm, entity_type FROM entities"
@@ -449,20 +329,10 @@ def _extract_abstract(paper: dict) -> str:
 
 
 def _write_paper_to_db(paper: dict, record: PaperRecord, conn: sqlite3.Connection) -> None:
-    """
-    Write paper metadata to the papers table.
+    
+    #Write paper metadata to the papers table.
 
-    SCHEMA FIX: The reader no longer writes to the entities table directly.
-    Entity writes happen via kg_population (called in ExtractionPipeline step 4).
-    The KG owns entity canonicalisation and the paper_entity_relationships table.
-    If the reader wrote entities using its own schema (UUID PK, paper_id FK,
-    text_norm) it would conflict with the KG's schema (entity_id="method::lstm",
-    canonical_text, raw_variants).
 
-    The reader's job is:
-      - Write paper metadata + reader-specific fields to papers table
-      - KG population writes all entity data
-    """
     meta = paper.get("metadata", {})
     conn.execute(
         """INSERT OR REPLACE INTO papers
@@ -476,7 +346,7 @@ def _write_paper_to_db(paper: dict, record: PaperRecord, conn: sqlite3.Connectio
             record.authors,
             record.year,
             record.venue,
-            meta.get("doi", ""),       # include doi from metadata
+            meta.get("doi", ""),       
             record.abstract,
             record.source_path,
             record.n_claims,
@@ -506,22 +376,16 @@ def _log_action(
     conn.commit()
 
 
-# ─────────────────────────────────────────────────────────────
 #  READER AGENT
-# ─────────────────────────────────────────────────────────────
-
 class ReaderAgent:
-    """
-    The Reader Agent owns the full paper ingestion pipeline.
 
-    For each PDF in papers_dir/:
-      1. Run GROBID → NER → Claim Extractor → KG (if not already done)
-      2. Compute coverage gain from the resulting claims_output.json
-      3. Decide read/skip based on gain threshold
-      4. Write paper + entities to SQLite
-
-    The planner calls agent.run(state). State flows through the LangGraph.
-    """
+    #For each PDF in papers_dir/:
+    #  1. Run GROBID → NER → Claim Extractor → KG (if not already done)
+    #  2. Compute coverage gain from the resulting claims_output.json
+    #  3. Decide read/skip based on gain threshold
+    #  4. Write paper + entities to SQLite
+    #State flows through the LangGraph.
+    
 
     VERSION = "2.0.0"
 
@@ -554,26 +418,12 @@ class ReaderAgent:
         e = f"[OBS]   {msg}"; self.trace.append(e)
         if self.verbose: print(f"  {e}")
 
-    # ── LangGraph / Planner entry point ───────────────────────
 
     def run(self, state: dict) -> dict:
-        """
-        Called by the Planner. Reads state, runs pipeline, returns updated state.
+        
+        #Called by the Planner. Reads state, runs pipeline, returns updated state.
 
-        State keys read:
-          session_id              (str)
-          papers_dir              (str) — where raw PDFs live, default "Data"
-          memory_dir              (str) — where output folders go, default "memory"
-          db_path                 (str) — optional, overrides default DB path
-          ollama_host             (str) — Ollama URL for claim extractor
-          coverage_gain_threshold (float)
-          no_extraction           (bool) — skip pipeline, only scan existing JSONs
-          use_llm                 (bool) — if False, disables claim extraction LLM call
-
-        State keys written:
-          reader_report    (dict)
-          coverage_score   (float)
-        """
+       
         session_id    = state.get("session_id", str(uuid.uuid4())[:8])
         papers_dir    = pathlib.Path(state.get("papers_dir",  str(self.papers_dir)))
         mem_dir       = pathlib.Path(state.get("memory_dir",  str(self.memory_dir)))
@@ -581,9 +431,7 @@ class ReaderAgent:
         ollama_host   = state.get("ollama_host",  self.ollama_host)
         threshold     = float(state.get("coverage_gain_threshold", COVERAGE_GAIN_THRESHOLD))
         # no_extraction=True means: don't run the pipeline, just scan existing files
-        # This is used for testing or when papers are already pre-processed
         no_extract    = state.get("no_extraction", self.no_extraction)
-        # If use_llm=False, also skip extraction (extraction requires Ollama)
         if not state.get("use_llm", True):
             no_extract = True
 
@@ -592,8 +440,6 @@ class ReaderAgent:
             ollama_host, threshold, no_extract,
         )
         return {**state, "reader_report": asdict(report)}
-
-    # ── Core logic ────────────────────────────────────────────
 
     def _run_internal(
         self,
@@ -615,7 +461,7 @@ class ReaderAgent:
 
         gexf_path = db_path.parent / "knowledge_graph.gexf"
 
-        # ── Step 1: Discover PDFs ──────────────────────────────
+        # Discover PDFs
         self._think("Discovering PDFs in papers_dir/")
         pdf_files = self._discover_pdfs(papers_dir)
         self._observe(f"Found {len(pdf_files)} PDF(s): {[p.name for p in pdf_files]}")
@@ -633,7 +479,7 @@ class ReaderAgent:
 
         report.papers_found = len(pdf_files)
 
-        # ── Step 2: Load known entities snapshot ─────────────
+        # Load known entities snapshot 
         self._act("Querying SQLite for known entities")
         known = _known_entities(conn)
         self._observe(
@@ -642,17 +488,17 @@ class ReaderAgent:
             f"{len(known['metric'])} metrics"
         )
 
-        # ── Step 3: Process each PDF ───────────────────────────
+        #  Process each PDF 
         for pdf_path in pdf_files:
             self._process_one_pdf(
                 pdf_path, memory_dir, db_path, gexf_path,
                 ollama_host, conn, known, session_id,
                 threshold, no_extract, report,
             )
-            # Refresh known after each paper so next paper's gain is relative
+            
             known = _known_entities(conn)
 
-        # ── Step 4: Coverage score ────────────────────────────
+        # Coverage score
         report.coverage_score = round(
             report.papers_read / max(report.papers_found, 1), 3
         )
@@ -678,7 +524,6 @@ class ReaderAgent:
         return report
 
     def _discover_pdfs(self, papers_dir: pathlib.Path) -> list[pathlib.Path]:
-        """Find all PDF files in papers_dir (non-recursive)."""
         if not papers_dir.exists():
             return []
         return sorted(papers_dir.glob("*.pdf"))
@@ -688,13 +533,7 @@ class ReaderAgent:
         pdf_path:   pathlib.Path,
         memory_dir: pathlib.Path,
     ) -> Optional[pathlib.Path]:
-        """
-        Find the claims_output.json for a given PDF.
-
-        Looks in:
-          memory/{pdf_stem}/claims_output.json             (exact match)
-          memory/{pdf_stem}_*/claims_output.json           (with year suffix)
-        """
+      
         stem = pdf_path.stem
 
         # Direct match
@@ -744,7 +583,7 @@ class ReaderAgent:
             report.extraction_failed += 1
             return
         else:
-            # ── Run the full extraction pipeline ──────────────
+            # Run the full extraction pipeline 
             self._act(f"  Running extraction pipeline: GROBID → NER → Claims → KG")
             pipeline = ExtractionPipeline(
                 pdf_path    = pdf_path,
@@ -765,7 +604,7 @@ class ReaderAgent:
             report.papers_extracted += 1
             self._observe(f"  '{pdf_path.name}' extraction complete → {claims_json}")
 
-        # ── Load claims_output.json ───────────────────────────
+        # Load claims_output.json
         try:
             with open(claims_json, encoding="utf-8") as f:
                 paper = json.load(f)
@@ -777,13 +616,13 @@ class ReaderAgent:
         paper_id = paper.get("paper_id") or claims_json.parent.name
         meta     = paper.get("metadata", {})
 
-        # Already in DB?
+        # Already in DB
         if _already_processed(paper_id, conn):
             self._observe(f"  '{paper_id}' already in SQLite — skipping DB write")
             report.papers_already_in_db += 1
             return
 
-        # ── Coverage gain ─────────────────────────────────────
+        #Coverage gain 
         gain, new_counts = _compute_coverage_gain(paper, known)
         self._observe(
             f"  '{paper_id}' gain={gain:.2f} "
@@ -792,10 +631,6 @@ class ReaderAgent:
             f"+{new_counts['metric']} metrics)"
         )
 
-        # ── READ-OR-SKIP DECISION ─────────────────────────────
-        # TODO (Phase 8 / Person 4):
-        #   state_vec = [gain, len(ents), n_claims, coverage_so_far, ...]
-        #   action = reader_policy.predict(state_vec)
         db_is_empty = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 0
         action      = "read" if (gain >= threshold or db_is_empty) else "skip"
         # ─────────────────────────────────────────────────────
@@ -850,12 +685,10 @@ class ReaderAgent:
         report:     ReaderReport,
         db_path:    pathlib.Path,
     ) -> ReaderReport:
-        """
-        Fallback: no PDFs found in papers_dir.
-        Scan memory/ for existing claims_output.json files and process them.
-        This preserves the v1.1.0 behaviour for users who pre-process papers
-        manually and put them directly in memory/.
-        """
+        
+        #Fallback: no PDFs found in papers_dir.
+        #Scan memory/ for existing claims_output.json files and process them.
+       
         self._think("Fallback: scanning memory/ for existing claims_output.json")
         known = _known_entities(conn)
 
@@ -946,8 +779,6 @@ class ReaderAgent:
         report.react_trace = self.trace
         return report
 
-    # ── Standalone CLI ────────────────────────────────────────
-
     def print_report(self, report: ReaderReport) -> None:
         print("\n" + "═" * 60)
         print(f"  READER AGENT REPORT  (v{self.VERSION})")
@@ -967,10 +798,6 @@ class ReaderAgent:
             print(f"  Papers read          : {', '.join(report.paper_ids_read)}")
         print("═" * 60 + "\n")
 
-
-# ─────────────────────────────────────────────────────────────
-#  CLI
-# ─────────────────────────────────────────────────────────────
 
 def main():
     import argparse

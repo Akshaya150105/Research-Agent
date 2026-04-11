@@ -12,15 +12,7 @@ def save_grobid_output(
     tei_xml: str,
     output_dir: str | Path,
 ) -> None:
-    """
-    Write all GROBID outputs to output_dir.
 
-    Parameters
-    ----------
-    result : TEIParseResult from tei_parser.parse_tei()
-    tei_xml : raw XML string (saved as tei_raw.xml for caching)
-    output_dir : directory to write files into (created if not exists)
-    """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 

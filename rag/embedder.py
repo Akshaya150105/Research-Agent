@@ -1,12 +1,7 @@
-"""
-embedder.py
------------
-Takes the chunk list from chunker.py and adds an 'embedding'
-field to each chunk. 
 
-Model: BAAI/bge-base-en-v1.5
-  - 768 dimensions
-"""
+#Takes the chunk list from chunker.py and adds an 'embedding'
+#field to each chunk. 
+
 
 import logging
 import time
@@ -14,7 +9,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ── model config ──────────────────────────────────────────────────────────
+# model config 
 MODEL_NAME   = "BAAI/bge-base-en-v1.5"
 EMBED_DIM    = 768
 BATCH_SIZE   = 32     

@@ -1,61 +1,3 @@
-"""
-comparator_agent.py  v3.1.0
-============================
-Person 3 — AI Agents  |  Branch: feat/agents  |  Folder: agents/
-
-v3.1.0 fixes the 12 false contradictions from v3.0.0.
-
-Root cause analysis of the false contradictions:
-  Output showed: [REAL][HIGH] bleu score on bleuscore: 2.0 vs 34.81
-
-  Problem 1 — generalize() was too destructive:
-    "bleu score" → strip "score" → "bleu"
-    "bleuscore"  → strip "score" → "bleu"  ← same key, false match
-    This caused metric names to match dataset keys. Removed entirely.
-
-  Problem 2 — No claim validity gate:
-    Claims like {"entities_involved": ["Transformer (big)", "BLEU", "WMT"],
-                  "value": 28.4}
-    The claim is about the Transformer model's score, not a standalone
-    metric+dataset pair. But the resolver was extracting BLEU as metric
-    and WMT as dataset, then comparing the score against an unrelated
-    claim from the other paper that happened to also mention BLEU+WMT.
-    Fix: a claim must resolve BOTH metric AND dataset from its
-    entities_involved to be a valid contradiction candidate.
-
-  Problem 3 — resolver.resolve_claim() cache key collision:
-    The old cache was keyed by (raw, entity_type, paper_id).
-    _resolve_one() and _best_match() shared the cache but used
-    different semantics, causing stale cache hits.
-    Fix: cache is now only on _resolve_one(), the atomic unit.
-
-What is a VALID contradiction:
-  Paper A: BLEU=28.4 on WMT14 EN-DE
-  Paper B: BLEU=16.5 on WMT14 EN-DE
-  ✓ Same metric (BLEU), same dataset (WMT14 EN-DE), both numeric values present
-
-What is NOT a valid contradiction:
-  Paper A: "Transformer achieves BLEU 28.4" — entities: [Transformer, BLEU, WMT]
-  Paper B: "LSTM achieves BLEU 16.5" — entities: [LSTM, BLEU, WMT]
-  If BLEU is "bleu score" in A but "bleu" in B after normalization → spurious match
-
-Expected output for Attention vs Seq2Seq:
-  - 0–2 real BLEU contradictions on shared WMT benchmarks
-  - 14 complement signals (Seq2Seq limitations addressed by Transformer)
-  - overall_relationship: "extends" (Transformer builds on Seq2Seq)
-
-Outputs
-───────
-  data_1/agent_outputs/comparisons/{paper_a}__{paper_b}.json
-  shared_memory/research.db
-  shared_memory/knowledge_graph.gexf
-
-Usage
-─────
-  python agents/comparator_agent.py --verbose
-  python agents/comparator_agent.py --no-llm --verbose
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -83,10 +25,6 @@ if str(_AGENTS_DIR) not in sys.path:
 from entity_resolver import EmbeddingEntityResolver, get_typed_entities
 
 
-# ─────────────────────────────────────────────────────────────
-#  CONFIGURATION
-# ─────────────────────────────────────────────────────────────
-
 MEMORY_DIR    = pathlib.Path("memory")
 SHARED_MEMORY = pathlib.Path("shared_memory")
 DB_PATH       = SHARED_MEMORY / "research.db"
@@ -94,7 +32,7 @@ GEXF_PATH     = SHARED_MEMORY / "knowledge_graph.gexf"
 OUTPUT_DIR    = pathlib.Path("data_1/agent_outputs/comparisons")
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-OLLAMA_MODEL = "qwen2.5" # Or your preferred model
+OLLAMA_MODEL = "qwen2.5" 
 
 # GEMINI_URL = (
 #     "https://generativelanguage.googleapis.com/v1beta"
@@ -171,10 +109,7 @@ TIME_METRICS = {
 }
 
 
-# ─────────────────────────────────────────────────────────────
 #  DATA MODELS
-# ─────────────────────────────────────────────────────────────
-
 @dataclass
 class ExperimentalSetup:
     paper_id:          str
@@ -298,9 +233,6 @@ class ComparisonResult:
         self.n_complements    = len(self.complementary_findings)
 
 
-# ─────────────────────────────────────────────────────────────
-#  EXPERIMENTAL SETUP EXTRACTOR
-# ─────────────────────────────────────────────────────────────
 
 class ExperimentalSetupExtractor:
 
@@ -412,10 +344,6 @@ class ExperimentalSetupExtractor:
         return "\n".join(lines) if lines else "  (setup found but no values extracted)"
 
 
-# ─────────────────────────────────────────────────────────────
-#  SETUP COMPARATOR
-# ─────────────────────────────────────────────────────────────
-
 class SetupComparator:
     LR_RATIO_THRESHOLD      = 10.0
     BATCH_RATIO_THRESHOLD   = 8.0
@@ -496,10 +424,6 @@ class SetupComparator:
         return min(1.0, s)
 
 
-# ─────────────────────────────────────────────────────────────
-#  LOADING
-# ─────────────────────────────────────────────────────────────
-
 def load_all_papers(memory_dir: pathlib.Path = MEMORY_DIR) -> dict[str, dict]:
     papers: dict[str, dict] = {}
     for folder in sorted(memory_dir.iterdir()):
@@ -576,10 +500,6 @@ def query_sqlite_for_citations(db_path: pathlib.Path = DB_PATH) -> set[tuple[str
         return set()
 
 
-# ─────────────────────────────────────────────────────────────
-#  HELPERS
-# ─────────────────────────────────────────────────────────────
-
 def jaccard(set_a: set, set_b: set) -> float:
     if not set_a and not set_b:
         return 0.0
@@ -600,18 +520,6 @@ def paper_title(paper: dict) -> str:
 
 
 def is_valid_performance_claim(resolved: dict) -> bool:
-    """
-    A claim is a valid contradiction candidate only if the resolver
-    could identify BOTH a metric AND a dataset from its entities_involved.
-
-    Without both, we can't establish "same experiment" — so we can't
-    call a numeric difference a contradiction.
-
-    This gate eliminates the false contradictions that were appearing
-    when claims like {"entities": ["Transformer (big)", "BLEU", "WMT"]}
-    were resolving with BLEU as metric but WMT resolving to a different
-    dataset key in paper B, causing a spurious match.
-    """
     return (
         resolved.get("metric")  is not None and
         resolved.get("dataset") is not None
@@ -646,9 +554,7 @@ def compute_result_divergence(
     return min(1.0, sum(diffs) / len(diffs))
 
 
-# ─────────────────────────────────────────────────────────────
 #  PAIR RANKING
-# ─────────────────────────────────────────────────────────────
 
 def build_candidate_pairs(
     papers:    dict[str, dict],
@@ -704,10 +610,7 @@ def build_candidate_pairs(
     return candidates[:max_pairs]
 
 
-# ─────────────────────────────────────────────────────────────
 #  LAYER 1 — PROGRAMMATIC SIGNAL EXTRACTION
-# ─────────────────────────────────────────────────────────────
-
 class ProgrammaticExtractor:
 
     def __init__(
@@ -735,20 +638,6 @@ class ProgrammaticExtractor:
     def shared_tasks(self)    -> list[str]: return sorted(self.ta["tasks"]    & self.tb["tasks"])
 
     def find_metric_contradictions(self) -> tuple[list[dict], list[dict]]:
-        """
-        Find genuine numeric contradictions.
-
-        VALIDITY GATES:
-        1. resolver resolved BOTH metric AND dataset
-        2. Same canonical metric key
-        3. Same canonical dataset key
-        4. Numeric values differ by > METRIC_DIFF_THRESHOLD
-        5. (NEW) Same primary method subject — or neither claim has one.
-            If both claims resolve a primary method and those methods differ,
-            the gap is expected progress/comparison, not a contradiction.
-            e.g. Transformer BLEU=41.8 vs LSTM BLEU=34.81 on WMT14-en-fr
-                → different subjects, reclassify as complement, not contradiction.
-        """
         real:     list[dict] = []
         filtered: list[dict] = []
 
@@ -771,27 +660,21 @@ class ProgrammaticExtractor:
                 if not is_valid_performance_claim(rb):
                     continue
 
-                # Gate 2 & 3: same canonical metric AND dataset
+                # same canonical metric AND dataset
                 if ra["metric"] != rb["metric"] or ra["dataset"] != rb["dataset"]:
                     continue
 
-                # Gate 4: values actually differ
+                # values actually differ
                 diff = abs(float(ca["value"]) - float(cb["value"]))
                 if diff <= METRIC_DIFF_THRESHOLD:
                     continue
 
-                # ── Gate 5 (NEW): subject method check ───────────────────────
-                # A contradiction requires the SAME system being evaluated.
-                # If both claims resolve a primary method and the methods differ,
-                # they're reporting results for different architectures on the
-                # same benchmark — that is expected, not contradictory.
                 # Only flag as contradiction when subjects are identical or unknown.
                 ra_method = ra["methods"][0] if ra.get("methods") else None
                 rb_method = rb["methods"][0] if rb.get("methods") else None
 
                 if ra_method and rb_method and ra_method != rb_method:
                     # Different subjects — reclassify as inter-system comparison
-                    # rather than silently dropping it, store for complement detection
                     filtered.append({
                         "finding_id":         f"inter_{uuid.uuid4().hex[:8]}",
                         "type":               "inter_system_comparison",
@@ -817,7 +700,6 @@ class ProgrammaticExtractor:
                         "confidence":         1.0,
                     })
                     continue
-                # ── end Gate 5 ───────────────────────────────────────────────
 
                 metric    = ra["metric"]
                 ratio_kws = ("f1", "accuracy", "bleu", "rouge", "precision",
@@ -833,7 +715,7 @@ class ProgrammaticExtractor:
                     "severity":            severity,
                     "metric":              ra["metric"],
                     "dataset":             ra["dataset"],
-                    "subject_method":      ra_method,   # track which system this is about
+                    "subject_method":      ra_method,   
                     "value_a":             float(ca["value"]),
                     "value_b":             float(cb["value"]),
                     "diff":                round(diff, 4),
@@ -846,7 +728,6 @@ class ProgrammaticExtractor:
                     "setup_note":          "",
                 }
 
-                # Setup-based filtering (unchanged)
                 if not self.div.setup_comparable:
                     finding["setup_note"]         = f"FILTERED — {self.div.incomparability_reason}"
                     finding["filter_reason"]      = "incomparable_setup"
@@ -884,7 +765,7 @@ class ProgrammaticExtractor:
         return real, filtered
 
     def find_complement_signals(self) -> list[dict]:
-        """Keyword overlap between limitations and claims, with setup boost."""
+        # Keyword overlap between limitations and claims
         complements: list[dict] = []
 
         def tokens(text: str) -> set:
@@ -954,7 +835,7 @@ class ProgrammaticExtractor:
         return complements
 
     def find_agreements(self) -> list[dict]:
-        """Numeric agreement on same validated (metric, dataset) pairs."""
+        # Numeric agreement on same validated (metric, dataset) pairs.
         agreements: list[dict] = []
 
         def perf_map(paper, pid, typed):
@@ -1006,10 +887,7 @@ class ProgrammaticExtractor:
         }
 
 
-# ─────────────────────────────────────────────────────────────
 #  LAYER 2 — LLM
-# ─────────────────────────────────────────────────────────────
-
 def _call_ollama_raw(prompt: str) -> str:
     """Call Ollama /api/generate with JSON constraint."""
     url = f"{OLLAMA_HOST}/api/generate"
@@ -1017,7 +895,7 @@ def _call_ollama_raw(prompt: str) -> str:
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
-        "format": "json",  # Forces valid JSON output
+        "format": "json",  
         "options": {
             "temperature": 0.1,
             "num_predict": 4096,
@@ -1163,9 +1041,7 @@ def apply_llm_enrichment(
     result.llm_used             = True
 
 
-# ─────────────────────────────────────────────────────────────
 #  MEMORY WRITE-BACK
-# ─────────────────────────────────────────────────────────────
 
 def _ensure_db_schema(conn: sqlite3.Connection) -> None:
     conn.executescript("""
@@ -1328,10 +1204,7 @@ def save_comparison_json(result: ComparisonResult,
     return out_path
 
 
-# ─────────────────────────────────────────────────────────────
 #  REACT AGENT
-# ─────────────────────────────────────────────────────────────
-
 class ComparatorAgent:
     VERSION = "3.1.0"
 
@@ -1496,7 +1369,6 @@ class ComparatorAgent:
                        signals["shared_datasets"]       or
                        signals["agreements"])
 
-        # --- UPDATED TO OLLAMA ---
         if self.llm_backend == "ollama":
             self._act(f"llm_enrich(): {pid_a} ↔ {pid_b}")
             limited = {
@@ -1510,14 +1382,12 @@ class ComparatorAgent:
                     paper_a, paper_b, limited,
                     setup_a, setup_b, div, pid_a, pid_b,
                 )
-                # Call your new Ollama function
                 text     = _call_ollama_raw(prompt) 
                 llm_resp = _parse_llm_json(text)
                 apply_llm_enrichment(result, limited, llm_resp, self.verbose)
                 self._observe(f"LLM done. overall={result.overall_relationship}")
             except Exception as e:
                 self._observe(f"LLM failed ({e}) — keeping heuristic results.")
-        # -------------------------
 
         if not result.llm_used:
             if result.contradictions:
@@ -1574,10 +1444,6 @@ class ComparatorAgent:
             return False, f"All {max_possible} pairs already compared"
         return True, f"{len(papers)} papers, {max_possible - existing} pairs remaining"
 
-
-# ─────────────────────────────────────────────────────────────
-#  PRINT + CLI
-# ─────────────────────────────────────────────────────────────
 
 def print_session_summary(report: dict) -> None:
     ICONS = {
@@ -1663,9 +1529,9 @@ def main() -> None:
 
     report = agent.run_session()
     print_session_summary(report)
-    print(f"  ✅ Comparisons : {OUTPUT_DIR}")
-    print(f"  ✅ SQLite       : {DB_PATH}")
-    print(f"  ✅ Graph        : {GEXF_PATH}\n")
+    print(f"  Comparisons : {OUTPUT_DIR}")
+    print(f"  SQLite       : {DB_PATH}")
+    print(f"  Graph        : {GEXF_PATH}\n")
 
 
 if __name__ == "__main__":

@@ -13,17 +13,7 @@ def run_pipeline(
     ollama_host: Optional[str] = None,
     requests_per_minute: int = 12,
 ) -> Path:
-    """
-    Args:
-        grobid_output_dir:   folder with sections.json
-        ner_results_dir:     folder with enriched_entities.json (defaults to grobid_output_dir)
-        ollama_host:         Ollama base URL, or reads OLLAMA_HOST env var
-                             (default: http://localhost:11434)
-        requests_per_minute: throttle for Ollama calls (default 12)
-
-    Returns:
-        Path to claims_output.json
-    """
+  
     grobid_folder = Path(grobid_output_dir)
     ner_folder    = Path(ner_results_dir) if ner_results_dir else grobid_folder
 
@@ -126,9 +116,7 @@ def run_pipeline(
         "sections_processed": len(sections),
     }
 
-    # ------------------------------------------------------------------ #
-    # File 1: update enriched_entities.json in place (merge Stage 1 + 2)  #
-    # ------------------------------------------------------------------ #
+  
     existing["llm_entities"]           = deduped_entities
     existing["llm_entity_index"]       = llm_entity_index
     existing["claims"]                 = all_claims
@@ -141,9 +129,7 @@ def run_pipeline(
         json.dump(existing, f, indent=2, ensure_ascii=False)
     print(f"[Pipeline] enriched_entities.json updated: {entities_path}")
 
-    # ------------------------------------------------------------------ #
-    # File 2: claims_output.json — clean standalone output                #
-    # ------------------------------------------------------------------ #
+
     claims_output = {
         "paper_id":     existing.get("paper_id", ""),
         "metadata":     existing.get("metadata", {}),
@@ -162,10 +148,6 @@ def run_pipeline(
     _print_summary(claims_output)
     return claims_path
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _build_index(entities):
     index = {"method": {}, "dataset": {}, "metric": {}, "task": {}}

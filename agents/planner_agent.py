@@ -1,31 +1,3 @@
-"""
-planner_agent.py  v1.1.0
-=========================
-Person 3 — AI Agents  |  Branch: feat/agents  |  Folder: agents/
-
-CHANGES FROM v1.0.0:
-  - Fixed import paths: use relative imports (from reader_agent import)
-    not package imports (from agents.reader_agent import) since this file
-    lives inside the agents/ folder itself.
-  - Fixed verbose flag not being passed into agent constructors.
-  - Fixed node_comparator: now passes memory_dir properly to run_session()
-    and MEMORY_DIR global so comparator respects the --memory-dir flag.
-  - Fixed sequential_fallback: gap_detector result was not merged into state
-    before writer ran — writer was seeing empty gap_report.
-  - Added session_log write after full session completes.
-  - Added __init__.py note at top — see setup instructions.
-
-SETUP:
-  Create agents/__init__.py (empty file) if it doesn't exist:
-    type nul > agents\\__init__.py   (Windows)
-    touch agents/__init__.py          (Mac/Linux)
-
-Usage:
-  python agents/planner_agent.py --topic "neural machine translation" --verbose
-  python agents/planner_agent.py --no-llm --verbose
-  python agents/planner_agent.py --no-llm --verbose --memory-dir memory
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -39,71 +11,60 @@ import uuid
 from typing import TypedDict, Annotated
 import operator
 
-# ── LangGraph ─────────────────────────────────────────────────
+# LangGraph 
 try:
     from langgraph.graph import StateGraph, END
     LANGGRAPH_AVAILABLE = True
 except ImportError:
     LANGGRAPH_AVAILABLE = False
     print(
-        "⚠  langgraph not installed. Run: pip install langgraph\n"
+        "  langgraph not installed. Run: pip install langgraph\n"
         "   Planner will run in sequential fallback mode.",
         file=sys.stderr,
     )
 
-# ── Path setup ────────────────────────────────────────────────
-# This file is at agents/planner_agent.py.
-# Project root is one level up.
 _AGENTS_DIR   = pathlib.Path(__file__).resolve().parent
 _PROJECT_ROOT = _AGENTS_DIR.parent
 
-# Add project root to path so `from rag.xxx import` works
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-# Add agents/ dir to path so siblings import cleanly without package prefix
 if str(_AGENTS_DIR) not in sys.path:
     sys.path.insert(0, str(_AGENTS_DIR))
 
-# ── Agent imports (sibling files, no package prefix) ─────────
+# Agent imports 
 from reader_agent     import ReaderAgent
 from writer_agent     import WriterAgent
 from comparator_agent import ComparatorAgent
-import comparator_agent as _comp_module   # to patch MEMORY_DIR
+import comparator_agent as _comp_module   
 
-# Teammate's agents — defensive imports
 try:
     from critic_agent import CriticAgent
     CRITIC_AVAILABLE = True
 except ImportError:
     CRITIC_AVAILABLE = False
-    print("⚠  critic_agent not found — critic step skipped.", file=sys.stderr)
+    print("  critic_agent not found — critic step skipped.", file=sys.stderr)
 
 try:
     from gap_detector_agent import GapDetectorAgent
     GAP_AVAILABLE = True
 except ImportError:
     GAP_AVAILABLE = False
-    print("⚠  gap_detector_agent not found — gap step skipped.", file=sys.stderr)
+    print("  gap_detector_agent not found — gap step skipped.", file=sys.stderr)
 
-# ── Shared paths (defaults, overridden by CLI) ────────────────
 MEMORY_DIR    = pathlib.Path("memory")
 SHARED_MEMORY = pathlib.Path("shared_memory")
 DB_PATH       = SHARED_MEMORY / "research.db"
 
 
-# ─────────────────────────────────────────────────────────────
 #  SHARED STATE
-# ─────────────────────────────────────────────────────────────
-
 class AgentState(TypedDict, total=False):
-    """
-    Single dict that flows through every LangGraph node.
-    Every node reads from it, returns a partial update.
-    LangGraph merges updates; react_trace uses operator.add so entries
-    from all nodes are appended rather than overwritten.
-    """
-    # Session config — set once at start
+    
+    #Single dict that flows through every LangGraph node.
+    #Every node reads from it, returns a partial update.
+    #LangGraph merges updates; react_trace uses operator.add so entries
+    #from all nodes are appended rather than overwritten.
+    
     session_id:              str
     topic:                   str
     papers_dir:              str   
@@ -116,37 +77,23 @@ class AgentState(TypedDict, total=False):
     coverage_score:          float
     coverage_gain_threshold: float
 
-    # Agent reports — filled as each agent runs
     reader_report:     dict
     comparator_report: dict
     critic_report:     dict
     gap_report:        dict
     writer_report:     dict
 
-    # Control
     session_complete: bool
 
-    # Append-only trace log (operator.add merges lists from all nodes)
     react_trace: Annotated[list, operator.add]
 
 
-# ─────────────────────────────────────────────────────────────
 #  ROUTING LOGIC
-# ─────────────────────────────────────────────────────────────
-
 class PlannerLogic:
-    """
-    All routing decisions in one place.
-    Basic mode = fixed sequence.
-    Phase 8 = replace return statement with policy.predict(state_vector).
-    """
 
     @staticmethod
     def build_state_vector(state: AgentState) -> list[float]:
-        """
-        10-float vector for the PPO policy in Phase 8.
-        # TODO (Phase 8 / Person 4): feed this into planner_policy.predict()
-        """
+
         rr = state.get("reader_report", {})
         cr = state.get("comparator_report", {})
         gr = state.get("gap_report") or {}
@@ -166,23 +113,20 @@ class PlannerLogic:
 
     @staticmethod
     def route_after_reader(state: AgentState) -> str:
-        """
-        ≥2 papers available → comparator.
-        <2 papers → writer directly (nothing to compare).
-        # TODO (Phase 8): replace with planner_policy.predict(state_vector)
-        """
+        
+        #2 papers available → comparator.
+        #<2 papers → writer directly (nothing to compare).
+    
         rr    = state.get("reader_report", {})
         total = rr.get("papers_read", 0) + rr.get("papers_already_in_db", 0)
         return "comparator" if total >= 2 else "writer"
 
     @staticmethod
     def route_after_comparator(state: AgentState) -> str:
-        # TODO (Phase 8): replace with policy
         return "critic" if CRITIC_AVAILABLE else "gap_detector"
 
     @staticmethod
     def route_after_critic(state: AgentState) -> str:
-        # TODO (Phase 8): replace with policy
         return "gap_detector" if GAP_AVAILABLE else "writer"
 
     @staticmethod
@@ -194,35 +138,23 @@ class PlannerLogic:
         return "end"
 
 
-# ─────────────────────────────────────────────────────────────
 #  LANGGRAPH NODE FUNCTIONS
 #  Each receives the full state dict, returns a PARTIAL update dict.
 #  LangGraph merges the partial update into the running state.
-# ─────────────────────────────────────────────────────────────
-
 def _vlog(state: AgentState, agent: str, msg: str) -> None:
     """Print a timestamped log line if verbose mode is on."""
     if state.get("verbose", False):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         print(f"  [{ts}][planner→{agent}] {msg}")
 
-# ─────────────────────────────────────────────────────────────
-#  LLM BACKEND DETECTION helpers
-# ─────────────────────────────────────────────────────────────
-
+#  LLM BACKEND DETECTION 
 def _detect_gemini_backend(use_llm: bool) -> str:
-    """Gemini backend — used by Comparator and Writer."""
     return "gemini" if (use_llm and os.environ.get("GEMINI_API_KEY")) else "none"
 
 
 def _detect_ollama_backend(use_llm: bool) -> str:
-    """
-    Ollama backend — used by Critic and Gap Detector.
-    Checks OLLAMA_HOST env var or tries localhost:11434.
-    """
     if not use_llm:
         return "none"
-    # Try OLLAMA_HOST or default
     host = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
     try:
         import requests
@@ -234,11 +166,11 @@ def _detect_ollama_backend(use_llm: bool) -> str:
     return "none"
 
 def node_reader(state: AgentState) -> dict:
-    """
-    Node 1 — Reader.
-    Scans memory/ for claims_output.json files, computes coverage gain
-    per paper, writes new papers to SQLite, returns coverage report.
-    """
+    
+    #Node 1 — Reader.
+    #Scans memory/ for claims_output.json files, computes coverage gain
+    #per paper, writes new papers to SQLite, returns coverage report.
+    
     _vlog(state, "reader", "Starting")
 
     agent = ReaderAgent(
@@ -246,7 +178,7 @@ def node_reader(state: AgentState) -> dict:
         db_path    = DB_PATH,
         verbose    = state.get("verbose", False),
     )
-    # Pass full state so agent can read session_id, threshold, etc.
+    # full state passed
     updated = agent.run(dict(state))
 
     rr       = updated.get("reader_report", {})
@@ -272,18 +204,9 @@ def node_reader(state: AgentState) -> dict:
 
 
 def node_comparator(state: AgentState) -> dict:
-    """
-    Node 2 — Comparator.
-    Reads papers from memory/ (its own load_all_papers()),
-    finds contradictions and complements, writes JSONs to
-    data_1/agent_outputs/comparisons/ and rows to SQLite comparisons table.
-
-    FIX: patch the comparator's module-level MEMORY_DIR global so it
-    respects the --memory-dir flag passed through state.
-    """
+    
     _vlog(state, "comparator", "Starting")
 
-    # Patch global so ComparatorAgent.load_all_papers() scans the right folder
     mem_path = pathlib.Path(state.get("memory_dir", "memory"))
     _comp_module.MEMORY_DIR = mem_path
 
@@ -319,16 +242,12 @@ def node_comparator(state: AgentState) -> dict:
 
 
 def node_critic(state: AgentState) -> dict:
-    """
-    Node 3 — Critic.
-    Now simplified to match the node_comparator style.
-    """
+
     _vlog(state, "critic", "Starting")
 
     if not CRITIC_AVAILABLE:
         return {"critic_report": {"skipped": True}, "react_trace": ["[critic] skipped"]}
 
-    # Logic: Critic uses Ollama/Local, not Gemini
     backend = "ollama" if (state.get("use_llm") and _detect_ollama_backend(True) == "ollama") else "none"
     
     agent = CriticAgent(
@@ -336,7 +255,6 @@ def node_critic(state: AgentState) -> dict:
         verbose=state.get("verbose", False)
     )
     
-    # One call does everything (Looping, Saving, Reporting)
     report = agent.run_session(dict(state))
 
     return {
@@ -347,16 +265,12 @@ def node_critic(state: AgentState) -> dict:
 
 
 def node_gap_detector(state: AgentState) -> dict:
-    """
-    Node 4 — Gap Detector.
-    Simplified to match the node_comparator / node_critic style.
-    """
+
     _vlog(state, "gap_detector", "Starting")
 
     if not GAP_AVAILABLE:
         return {"gap_report": {"gaps": [], "skipped": True}, "react_trace": ["[gap] skipped"]}
 
-    # Pass 'ollama' if LLM is enabled and Ollama is running
     backend = "ollama" if (state.get("use_llm") and _detect_ollama_backend(True) == "ollama") else "none"
     
     agent = GapDetectorAgent(
@@ -364,7 +278,6 @@ def node_gap_detector(state: AgentState) -> dict:
         verbose=state.get("verbose", False)
     )
     
-    # Call the new Smart Agent method
     report = agent.run_session(dict(state))
 
     return {
@@ -375,12 +288,10 @@ def node_gap_detector(state: AgentState) -> dict:
 
 
 def node_writer(state: AgentState) -> dict:
-    """
-    Node 5 — Writer.
-    Reads all structured outputs from SQLite + agent JSON files.
-    Synthesises a Markdown literature review section by section.
-    Writes to data_1/agent_outputs/reviews/session_{id}_draft.md.
-    """
+    
+    #Node 5 — Writer.
+    #Reads all structured outputs from SQLite + agent JSON files.
+    #Synthesises a Markdown literature review section by section.
     _vlog(state, "writer", "Starting")
 
     agent   = WriterAgent(verbose=state.get("verbose", False))
@@ -399,22 +310,16 @@ def node_writer(state: AgentState) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────
 #  PLANNER AGENT
-# ─────────────────────────────────────────────────────────────
 
 class PlannerAgent:
-    """
-    Builds the LangGraph StateGraph and runs the full pipeline.
+    
+    #Builds the LangGraph StateGraph and runs the full pipeline.
 
-    Graph topology:
-      START → reader → comparator → critic → gap_detector → writer → END
+    #Graph topology:
+    #  START → reader → comparator → critic → gap_detector → writer → END
 
-    Each edge is conditional — the route_after_* functions decide
-    whether to skip an agent (e.g. skip critic if not installed).
-
-    Falls back to sequential execution if langgraph is not installed.
-    """
+    #Each edge is conditional — the route_after_* functions decide whether to skip an agent .
 
     VERSION = "1.1.0"
 
@@ -426,10 +331,9 @@ class PlannerAgent:
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             print(f"[{ts}][planner] {msg}")
 
-    # ── Graph construction ────────────────────────────────────
+    # Graph construction
 
     def build_graph(self):
-        """Compile and return the LangGraph StateGraph."""
         if not LANGGRAPH_AVAILABLE:
             return None
 
@@ -464,22 +368,19 @@ class PlannerAgent:
 
         return g.compile()
 
-    # ── Session runner ────────────────────────────────────────
 
     def run(
         self,
         topic:      str  = "",
         memory_dir: str  = "memory",
-        papers_dir: str  = "data_1/papers",      # NEW
-        ollama_host: str = "",          # NEW
+        papers_dir: str  = "data_1/papers",      
+        ollama_host: str = "",          
         no_extraction: bool = False,
         use_llm:    bool = True,
     ) -> dict:
-        """
-        Run a full research session end-to-end.
 
-        Returns the final AgentState dict (all agent reports included).
-        """
+        #Returns the final AgentState dict (all agent reports included).
+        
         session_id = str(uuid.uuid4())[:8]
         self._print(f"Session {session_id} | topic='{topic}' | llm={use_llm}")
 
@@ -492,10 +393,10 @@ class PlannerAgent:
         initial: AgentState = {
             "session_id":              session_id,
             "topic":                   topic,
-            "papers_dir":              papers_dir,      # NEW
+            "papers_dir":              papers_dir,      
             "memory_dir":              memory_dir,
-            "ollama_host":             resolved_ollama, # NEW
-            "no_extraction":           no_extraction or (not use_llm), # NEW (Auto-skip if no LLM)
+            "ollama_host":             resolved_ollama, 
+            "no_extraction":           no_extraction or (not use_llm), 
             "use_llm":                 use_llm,
             "verbose":                 self.verbose,
             "step_count":              0,
@@ -518,17 +419,14 @@ class PlannerAgent:
         print("LOG DB =", DB_PATH)
         return final_state
 
-    # ── Sequential fallback (no LangGraph) ───────────────────
+    # Sequential fallback (no LangGraph) 
 
     def _sequential_fallback(self, state: AgentState) -> AgentState:
-        """
-        Same logic as the graph but without LangGraph overhead.
-        Each node returns a partial dict — we merge it with {**state, **partial}.
-        """
-        # Step 1: Reader (always runs)
+        
+        #Same logic as the graph but without LangGraph overhead.
+       
         state = {**state, **node_reader(state)}
 
-        # Step 2+: Route from reader's result
         route = PlannerLogic.route_after_reader(state)
 
         if route == "comparator":
@@ -547,14 +445,12 @@ class PlannerAgent:
                 # critic not available, jumped straight to gap
                 state = {**state, **node_gap_detector(state)}
 
-        # Step N: Writer always runs last
         state = {**state, **node_writer(state)}
         return state
 
-    # ── Session log write to SQLite ───────────────────────────
+    # Session log written to SQLite 
 
     def _write_session_log(self, state: AgentState) -> None:
-        """Write a single summary row to session_log for the full pipeline run."""
         if not DB_PATH.exists():
             return
         try:
@@ -585,7 +481,6 @@ class PlannerAgent:
         except Exception as e:
             print(f"  [planner] session_log write failed: {e}", file=sys.stderr)
 
-    # ── Summary print ─────────────────────────────────────────
 
     def _print_summary(self, state: AgentState) -> None:
         rr = state.get("reader_report",     {})
@@ -621,19 +516,15 @@ class PlannerAgent:
         print()
 
 
-# ─────────────────────────────────────────────────────────────
-#  CLI ENTRY POINT
-# ─────────────────────────────────────────────────────────────
-
 def main():
     parser = argparse.ArgumentParser(
         description=f"Planner Agent v1.1.0 — full research pipeline"
     )
     parser.add_argument("--topic",      default="")
     parser.add_argument("--memory-dir", default="memory")
-    parser.add_argument("--papers-dir", default="data_1/papers", help="Where raw PDFs live") # NEW
-    parser.add_argument("--ollama-host", default="", help="Ollama URL") # NEW
-    parser.add_argument("--no-extraction", action="store_true", help="Skip PDF processing") # NEW
+    parser.add_argument("--papers-dir", default="data_1/papers", help="Where raw PDFs live") 
+    parser.add_argument("--ollama-host", default="", help="Ollama URL")
+    parser.add_argument("--no-extraction", action="store_true", help="Skip PDF processing") 
     parser.add_argument("--no-llm",     action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
@@ -642,9 +533,9 @@ def main():
     planner.run(
         topic         = args.topic,
         memory_dir    = args.memory_dir,
-        papers_dir    = args.papers_dir,      # NEW
-        ollama_host   = args.ollama_host,     # NEW
-        no_extraction = args.no_extraction,   # NEW
+        papers_dir    = args.papers_dir,      
+        ollama_host   = args.ollama_host,     
+        no_extraction = args.no_extraction,   
         use_llm       = not args.no_llm,
     )
 

@@ -7,9 +7,8 @@ from typing import List, Dict, Any
 import requests
 
 
-# ---------------------------------------------------------------------------
+
 # Prompts
-# ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """You are a scientific information extraction system for academic research papers.
 Your job is to extract structured information from any research paper section, regardless of domain.
@@ -219,9 +218,7 @@ OUTPUT FORMAT:
 }}"""
 
 
-# ---------------------------------------------------------------------------
 # Rate limiter
-# ---------------------------------------------------------------------------
 
 class RateLimiter:
     def __init__(self, requests_per_minute: int = 12):
@@ -236,9 +233,7 @@ class RateLimiter:
         self.last_call = time.time()
 
 
-# ---------------------------------------------------------------------------
 # Main extractor
-# ---------------------------------------------------------------------------
 
 class LLMClaimExtractor:
 
@@ -281,7 +276,7 @@ class LLMClaimExtractor:
             "stream": False,
             "format": "json",          # Ollama-native JSON mode
             "options": {
-                "temperature": 0.0,    # Deterministic output
+                "temperature": 0.0,    
                 "num_predict": 4096,
             },
         }
@@ -293,7 +288,7 @@ class LLMClaimExtractor:
                 "ngrok-skip-browser-warning": "true", 
             },
             json=payload,
-            timeout=300,               # Large sections may take time
+            timeout=300,               
         )
         response.raise_for_status()
         data = response.json()
@@ -343,11 +338,17 @@ class LLMClaimExtractor:
 
             except json.JSONDecodeError as e:
                 print(f"[ClaimExtractor] JSON parse error in {section_type}: {e}")
+
+                if len(section_text) > 5000:   # threshold you can tune
+                    print(f"[ClaimExtractor] Skipping large section due to JSON failure")
+                    return self._empty_result(section_type, section_heading, error="skipped_large_section")
+
                 if attempt < self.MAX_RETRIES - 1:
                     wait = self.RETRY_BACKOFF * (attempt + 1)
                     print(f"[ClaimExtractor] Retrying in {wait}s...")
                     time.sleep(wait)
                     continue
+
                 return self._empty_result(section_type, section_heading, error=str(e))
 
             except requests.HTTPError as e:
@@ -369,10 +370,7 @@ class LLMClaimExtractor:
 
         return self._empty_result(section_type, section_heading, error="max retries exceeded")
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
+  
     def _format_ner_hints(self, ner_entities: List[Dict]) -> str:
         if not ner_entities:
             return "None"

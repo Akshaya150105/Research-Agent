@@ -21,10 +21,6 @@ import re
 from pathlib import Path
 
 def extract_year(data: dict, file_path: str) -> int | None:
-    """
-    Robust year extraction that works for ANY paper format.
-    """
-
     meta = data.get("metadata", {})
     year = meta.get("year")
 
@@ -40,7 +36,6 @@ def extract_year(data: dict, file_path: str) -> int | None:
         candidates.append(data["paper_id"])
 
     for text in candidates:
-        # arXiv pattern: 1706.03762 or 1706.03762v7
         match = re.search(r"(\d{2})(\d{2})\.\d+", text)
         if not match:
             match = re.search(r"(\d{2})(\d{2})", text)
@@ -49,17 +44,12 @@ def extract_year(data: dict, file_path: str) -> int | None:
             yy = int(match.group(1))
             return 1900 + yy if yy >= 90 else 2000 + yy
 
-    # 3. Try generic 4-digit year
     for text in candidates:
         match = re.search(r"(19|20)\d{2}", text)
         if match:
             return int(match.group())
 
     return None
-
-# ─────────────────────────────────────────────
-#  CONFIGURATION
-# ─────────────────────────────────────────────
 
 OUTPUT_DIR = pathlib.Path("data_1/agent_outputs/critiques")
 
@@ -95,13 +85,9 @@ SPEED_KEYWORDS = [
 
 
 # Known ML/NLP baseline publication years.
-# Used by check_outdated_baselines() to flag stale comparisons.
-# Covers the most common baselines seen in NLP/ML papers 2015-2024.
-# Add more as needed — this dict never needs to be exhaustive,
-# unknown baselines are flagged separately at LOW severity.
 KNOWN_BASELINE_YEARS: dict[str, int] = {
     # RNN / LSTM family
-    "lstm":             1997,   # Hochreiter & Schmidhuber 1997
+    "lstm":             1997,   
     "biglstm":          2016,
     "lstmp":            2014,
     "rnn":              1990,
@@ -141,13 +127,10 @@ KNOWN_BASELINE_YEARS: dict[str, int] = {
     "sac":              2018,
 }
 
-# How many years old a baseline can be before flagging (relative to paper year)
 BASELINE_STALENESS_THRESHOLD = 4
 # Year threshold: papers published before this year get softer severity
-# for norms (significance testing, ablations) that weren't standard then
 NORM_YEAR_THRESHOLD = 2020
 
-# Severity ladder for upgrade validation
 SEV_LADDER = ["LOW", "MEDIUM", "HIGH"]
 
 LLM_TIMEOUT_SECONDS  = 60
@@ -155,10 +138,7 @@ LLM_MAX_RETRIES      = 3
 LLM_RETRY_BASE_DELAY = 2
 
 
-# ─────────────────────────────────────────────
 #  DATA MODELS
-# ─────────────────────────────────────────────
-
 class Severity(str, Enum):
     HIGH   = "HIGH"
     MEDIUM = "MEDIUM"
@@ -179,7 +159,7 @@ class Weakness:
     description:   str
     evidence:      str
     suggestion:    str
-    source:        str        # "heuristic" | "llm"
+    source:        str        
     section:       str  = ""
     confidence:    float = 1.0   # heuristic=1.0, llm=0.85, llm_filtered=0.0 (rejected)
     validation_status: str = "accepted"  # "accepted" | "rejected_hallucination" | "rejected_contradiction"
@@ -218,10 +198,7 @@ class CritiqueResult:
             self.overall_quality = "ACCEPTABLE"
 
 
-# ─────────────────────────────────────────────
 #  INPUT LOADING
-# ─────────────────────────────────────────────
-
 def load_claims_output(path: str | pathlib.Path) -> dict:
     p = pathlib.Path(path)
     if not p.exists():
@@ -257,12 +234,9 @@ def load_claims_output(path: str | pathlib.Path) -> dict:
 
 
 
-# ─────────────────────────────────────────────
 #  ENTITY NAME NORMALISATION
-# ─────────────────────────────────────────────
-
 def _normalise_name(name: str) -> str:
-    """Lowercase, strip punctuation, collapse whitespace."""
+    #Lowercase, strip punctuation, collapse whitespace.
     name = name.lower().strip()
     name = re.sub(r"[^a-z0-9 ]", " ", name)
     name = re.sub(r"\s+", " ", name).strip()
@@ -270,7 +244,7 @@ def _normalise_name(name: str) -> str:
 
 
 def _stem(tok: str) -> str:
-    """Minimal stemmer — strips trailing 's'/'es' from tokens longer than 3 chars."""
+    #Minimal stemmer — strips trailing 's'/'es' from tokens longer than 3 chars.
     return tok.rstrip("es").rstrip("s") if len(tok) > 3 else tok
 
 
@@ -290,14 +264,6 @@ def _deduplicate_entity_names(names: list[str], threshold: float = 0.60) -> list
     """
     Remove near-duplicate entity names using stemmed Jaccard similarity.
     Keeps the shorter (more canonical) form when two names are similar enough.
-
-    Threshold 0.60 merges:
-      "one billion word benchmark" ↔ "one billion words benchmark evaluation"
-      "CoNLL-2003"                 ↔ "CoNLL 2003"
-
-    But keeps separate:
-      "SQuAD" ↔ "SQuAD 2.0"   (0.33 — different versions)
-      "GLUE"  ↔ "SuperGLUE"   (0.00 — different benchmarks)
     """
     if len(names) <= 1:
         return names
@@ -319,16 +285,9 @@ def _deduplicate_entity_names(names: list[str], threshold: float = 0.60) -> list
     return [names[i] for i in range(len(names)) if keep[i]]
 
 
-# ─────────────────────────────────────────────
 #  GROUND TRUTH INDEX
-#  Built once from structured data — used by the hallucination filter
-# ─────────────────────────────────────────────
-
+#  Build a flat index of what is ACTUALLY present in the structured data. This is the source of truth the hallucination filter checks against.
 def build_ground_truth_index(data: dict) -> dict:
-    """
-    Build a flat index of what is ACTUALLY present in the structured data.
-    This is the source of truth the hallucination filter checks against.
-    """
     ei = data.get("entity_index", {})
     if not isinstance(ei, dict):
         ei = {}
@@ -358,7 +317,6 @@ def build_ground_truth_index(data: dict) -> dict:
     paper_id = data.get("paper_id", "")
     meta = data.get("metadata", {})
 
-    # 🔧 Fix year using robust extractor
     file_path = data.get("_file_path", "")
     year = extract_year(data, file_path)
 
@@ -400,12 +358,12 @@ def build_ground_truth_index(data: dict) -> dict:
     }
 
 def detect_ablation_signals(text: str) -> bool:
-    """
-    Improved ablation detection using multiple signals:
-    - keyword match (existing)
-    - variant/config comparison
-    - structural signal (multiple model comparisons)
-    """
+
+    # Improved ablation detection using multiple signals:
+    # keyword match (existing)
+    # variant/config comparison
+    # structural signal (multiple model comparisons)
+    
     text = text.lower()
 
     keyword_hit = any(k in text for k in ABLATION_KEYWORDS)
@@ -419,10 +377,8 @@ def detect_ablation_signals(text: str) -> bool:
 
     return keyword_hit or variant_hit or structural_hit
 
-# ─────────────────────────────────────────────
-#  HALLUCINATION FILTER
-# ─────────────────────────────────────────────
 
+#  HALLUCINATION FILTER
 # Maps weakness_type keywords → what the LLM is claiming is ABSENT
 # If that thing is actually PRESENT in ground_truth, the weakness is a hallucination
 ABSENCE_CLAIM_MAP = {
@@ -436,8 +392,8 @@ ABSENCE_CLAIM_MAP = {
     "reproducib":    "has_reproducibility",
     "code":          "has_reproducibility",
     "github":        "has_reproducibility",
-    "dataset":       None,   # needs count check
-    "baseline":      None,   # needs description check — can't auto-validate
+    "dataset":       None,   
+    "baseline":      None,   
 }
 
 
@@ -448,19 +404,18 @@ def validate_llm_weakness(
     paper_year: int | None,
     verbose: bool = False,
 ) -> tuple[bool, str]:
-    """
-    Validate a single LLM-generated weakness against ground truth.
+    #Validate a single LLM-generated weakness against ground truth.
 
-    Returns (is_valid, rejection_reason).
-    is_valid=True  → accept the weakness
-    is_valid=False → reject with reason
-    """
+    #Returns (is_valid, rejection_reason).
+    #is_valid=True  → accept the weakness
+    #is_valid=False → reject with reason
+    
     wtype = weakness.weakness_type.lower()
     desc  = weakness.description.lower()
     ev    = weakness.evidence.lower()
     combined = wtype + " " + desc + " " + ev
 
-    # ── Rule 1: Contradiction check ────────────────────────────────────────
+    # Contradiction check
     # If LLM claims X is missing but heuristics confirmed X is present, reject.
     for keyword, gt_key in ABSENCE_CLAIM_MAP.items():
         if keyword in combined:
@@ -474,7 +429,7 @@ def validate_llm_weakness(
                     print(f"    [filter] ❌ REJECTED '{weakness.weakness_type}': {reason[:120]}")
                 return False, reason
 
-    # ── Rule 2: Dataset count contradiction ────────────────────────────────
+    #Dataset count contradiction 
     # LLM says "only one dataset" but there are actually 2+
     if ("single dataset" in combined or "only one dataset" in combined
             or "single-dataset" in combined):
@@ -487,7 +442,7 @@ def validate_llm_weakness(
                 print(f"    [filter] ❌ REJECTED '{weakness.weakness_type}': {reason[:120]}")
             return False, reason
 
-    # ── Rule 3: Evidence grounding check ───────────────────────────────────
+    # Evidence grounding check
     # LLM evidence must reference something that actually appears in the data.
     # If evidence is completely generic (no paper-specific terms), flag as low confidence.
     # We don't reject on this alone but reduce confidence to 0.6.
@@ -504,7 +459,7 @@ def validate_llm_weakness(
             print(f"    [filter] ⚠ LOW CONFIDENCE '{weakness.weakness_type}' (needs_review=True): "
                   f"evidence tokens don't match paper content ({len(overlap)}/5 overlap)")
 
-    # ── Rule 4: Heuristic authority check ──────────────────────────────────
+    #Heuristic authority check 
     # If heuristics already confirmed something exists, LLM can't say it's missing.
     heuristic_present = {
         "ablation":     heuristic_findings.get("has_ablation", False),
@@ -523,7 +478,7 @@ def validate_llm_weakness(
             return False, reason
 
     if verbose:
-        print(f"    [filter] ✅ ACCEPTED '{weakness.weakness_type}' "
+        print(f"    [filter] ACCEPTED '{weakness.weakness_type}' "
               f"(confidence: {weakness.confidence})")
     return True, ""
 
@@ -536,23 +491,16 @@ def validate_severity_adjustment(
     justification: str,
     verbose: bool = False,
 ) -> tuple[Severity, str]:
-    """
-    Validate and possibly cap a severity adjustment proposed by the LLM.
+    
+    #Validate and possibly cap a severity adjustment proposed by the LLM.
 
-    Rules:
-    - LLM can freely DOWNGRADE severity (always safe)
-    - LLM can upgrade by MAX ONE LEVEL
-    - For pre-NORM_YEAR_THRESHOLD papers: statistical significance and ablation
-      cannot be upgraded to HIGH (these weren't standard practice then)
-    - Any upgrade requires justification text
-    """
     current_idx  = SEV_LADDER.index(current_severity.value)
     proposed_idx = SEV_LADDER.index(proposed_severity.value)
 
     # Downgrade — always allow
     if proposed_idx <= current_idx:
         if verbose and proposed_idx < current_idx:
-            print(f"    [severity] ✅ Downgrade allowed: {current_severity.value} → {proposed_severity.value}")
+            print(f"    [severity] Downgrade allowed: {current_severity.value} → {proposed_severity.value}")
         return proposed_severity, "downgrade_allowed"
 
     # Upgrade by more than one level — cap at one level
@@ -576,26 +524,18 @@ def validate_severity_adjustment(
     # Upgrade by one level with justification — allow
     if justification and len(justification.strip()) > 10:
         if verbose:
-            print(f"    [severity] ✅ Upgrade allowed: {current_severity.value} → {proposed_severity.value}")
+            print(f"    [severity] Upgrade allowed: {current_severity.value} → {proposed_severity.value}")
         return proposed_severity, "upgrade_with_justification"
 
     # Upgrade with no justification — reject upgrade, keep current
     if verbose:
-        print(f"    [severity] ⚠ Upgrade rejected (no justification): keeping {current_severity.value}")
+        print(f"    [severity] Upgrade rejected (no justification): keeping {current_severity.value}")
     return current_severity, "upgrade_rejected_no_justification"
 
 
-# ─────────────────────────────────────────────
 #  LLM CALL HELPER (exponential backoff)
-# ─────────────────────────────────────────────
 
 def _llm_call_raw(prompt: str, llm_backend: str) -> str:
-    """
-    Call Ollama /api/generate with format='json' so the model is
-    constrained to produce valid JSON output.
-    All prompts in this agent already end with 'Reply with ONLY valid JSON'
-    instructions — the format='json' flag enforces this at the API level.
-    """
     if llm_backend != "ollama":
         raise EnvironmentError(
             f"Unsupported LLM backend '{llm_backend}'. Only 'ollama' is supported."
@@ -617,9 +557,9 @@ def _llm_call_raw(prompt: str, llm_backend: str) -> str:
                     "model":  OLLAMA_MODEL,
                     "prompt": prompt,
                     "stream": False,
-                    "format": "json",           # Ollama-native JSON mode — enforces valid JSON
+                    "format": "json",           
                     "options": {
-                        "temperature": 0.0,     # Deterministic output
+                        "temperature": 0.0,    
                         "num_predict": 4096,
                     },
                 },
@@ -646,10 +586,7 @@ def _llm_call_raw(prompt: str, llm_backend: str) -> str:
     raise RuntimeError(f"LLM call failed after {LLM_MAX_RETRIES} attempts. Last: {last_error}")
 
 
-# ─────────────────────────────────────────────
 #  PAPER TYPE DETECTION
-# ─────────────────────────────────────────────
-
 def detect_paper_type(data: dict, llm_backend: str, verbose: bool = False) -> PaperType:
     abstract = data.get("metadata", {}).get("abstract", "")[:800]
 
@@ -681,10 +618,7 @@ def detect_paper_type(data: dict, llm_backend: str, verbose: bool = False) -> Pa
         return PaperType.EXPERIMENTAL
 
 
-# ─────────────────────────────────────────────
 #  HEURISTIC CHECKS  (Layer 1 — ground truth)
-# ─────────────────────────────────────────────
-
 class HeuristicChecker:
 
     def __init__(self, data: dict, paper_type: PaperType, gt: dict, verbose: bool = False):
@@ -854,8 +788,6 @@ class HeuristicChecker:
         """
         Check if baselines referenced in comparative claims are outdated
         relative to the paper's publication year.
-
-        Strategy:
           1. Extract method names from comparative claims.
           2. Look them up in KNOWN_BASELINE_YEARS.
           3. Flag if median known-baseline year is > BASELINE_STALENESS_THRESHOLD years old.
@@ -887,8 +819,7 @@ class HeuristicChecker:
             for e in c.get("entities_involved", []):
                 baseline_entities.append(e.lower().strip())
 
-        # Deduplicate — only use entities from comparative claims,
-        # NOT all gt methods (that would flag unrelated referenced methods)
+        # Deduplicate — only use entities from comparative claims
         baseline_entities = list(set(baseline_entities))
 
         # Look up known years
@@ -974,10 +905,7 @@ class HeuristicChecker:
         return weaknesses
 
 
-# ─────────────────────────────────────────────
 #  LLM ENRICHMENT  (Layer 2)
-# ─────────────────────────────────────────────
-
 def _build_enrichment_prompt(
     data: dict,
     gt: dict,
@@ -1004,7 +932,6 @@ def _build_enrichment_prompt(
         ) if heuristic_weaknesses else "  (none)"
     )
 
-    # Tell the LLM exactly what IS present so it can't hallucinate absences
     present_facts = f"""CONFIRMED PRESENT IN THIS PAPER (do NOT flag these as missing):
 - Datasets ({gt['n_datasets']}): {gt['datasets']}
 - Metrics ({gt['n_metrics']}): {gt['metrics']}
@@ -1123,9 +1050,7 @@ def llm_enrich(
     llm_backend: str,
     verbose: bool = False,
 ) -> tuple[list[Weakness], list[dict], list[dict]]:
-    """
-    Returns (accepted_weaknesses, severity_adjustments, rejected_hallucinations)
-    """
+    #Returns (accepted_weaknesses, severity_adjustments, rejected_hallucinations)
     prompt = _build_enrichment_prompt(data, gt, heuristic_weaknesses, paper_type)
 
     if verbose:
@@ -1137,7 +1062,7 @@ def llm_enrich(
     if verbose:
         print("  [llm] Response parsed successfully")
 
-    # Build heuristic findings dict for the filter
+    # heuristic findings dict for the filter
     heuristic_findings = {
         "has_ablation":      gt["has_ablation"],
         "has_significance":  gt["has_significance"],
@@ -1184,7 +1109,7 @@ def llm_enrich(
                 "description": candidate.description[:200],
             })
 
-    # Post-processing: downgrade limited_empirical_scope to LOW
+    # Post-processing - downgrade limited_empirical_scope to LOW
     # if fewer than 3 tasks claimed (scope claim isn't strong enough to be MEDIUM)
     for w in accepted:
         if w.weakness_type == "limited_empirical_scope" and w.severity == Severity.MEDIUM:
@@ -1198,9 +1123,7 @@ def llm_enrich(
     return accepted, parsed.get("severity_adjustments", []), rejected
 
 
-# ─────────────────────────────────────────────
 #  REACT AGENT
-# ─────────────────────────────────────────────
 
 class CriticAgent:
     VERSION = "2.2.0"
@@ -1228,21 +1151,15 @@ class CriticAgent:
         if self.verbose: print(f"  {entry}")
 
     def run_session(self, session_state: dict) -> dict:
-        """
-        MATCHES COMPARATOR STYLE:
-        Takes the full session state, finds papers to process, 
-        and returns a summary report.
-        """
         self._think("Starting Critic Session")
         
-        # 1. Identify papers to process from the state
         rr = session_state.get("reader_report", {})
         paper_ids = rr.get("paper_ids_read", [])
         memory_dir = pathlib.Path(session_state.get("memory_dir", "memory"))
 
         if not paper_ids:
             self._observe("No new papers to critique. Checking for existing papers...")
-            # Optional: Fallback to all papers if reader didn't run
+            # Fallback to all papers if reader didn't run
             paper_ids = [p.name for p in memory_dir.iterdir() if p.is_dir()]
 
         if not paper_ids:
@@ -1251,7 +1168,6 @@ class CriticAgent:
 
         self._observe(f"Papers to critique: {paper_ids}")
 
-        # 2. Internal loop over papers (Logic moved here from Planner)
         for pid in paper_ids:
             path = memory_dir / pid / "claims_output.json"
             if not path.exists():
@@ -1259,10 +1175,9 @@ class CriticAgent:
 
             self._think(f"Critiquing: {pid}")
             try:
-                # Call existing logic
                 result, data = self.run(path)
                 
-                # 3. Internal Write-back (Shared Memory)
+                # Internal Write-back (Shared Memory)
                 save_critique(result, OUTPUT_DIR)
                 save_enriched_paper_json(result, path, data, verbose=self.verbose)
                 
@@ -1271,12 +1186,12 @@ class CriticAgent:
                 if result.severity_counts.get("HIGH", 0) > 0:
                     self._high_concern_count += 1
             except Exception as e:
-                self._observe(f"⚠ Failed on {pid}: {e}")
+                self._observe(f"Failed on {pid}: {e}")
 
         return self._build_session_report(len(paper_ids))
 
     def _build_session_report(self, n_papers: int) -> dict:
-        """Builds the final dictionary to return to the Planner."""
+        # the final dictionary to return to the Planner.
         return {
             "agent": "critic_agent",
             "agent_version": self.VERSION,
@@ -1290,11 +1205,10 @@ class CriticAgent:
     def run(self, claims_path: str | pathlib.Path) -> CritiqueResult:
         claims_path = pathlib.Path(claims_path)
 
-        # Step 0: Load
         self._think(f"Loading input from {claims_path}")
         self._act("load_claims_output()")
         data = load_claims_output(claims_path)
-                # 🧪 DEBUG + FORCE YEAR FIX
+
         from pathlib import Path
         import re
 
@@ -1315,12 +1229,10 @@ class CriticAgent:
             print("DEBUG: updated metadata year =", data["metadata"]["year"])
         data["_file_path"] = str(claims_path)
         meta = data.get("metadata", {})
-        # 🔧 FORCE year correction at source
         year = extract_year(data, str(claims_path))
         if year:
             data.setdefault("metadata", {})["year"] = year
 
-        # refresh meta AFTER fixing
         meta = data.get("metadata", {})
         self._observe(
             f"Loaded '{meta.get('title','?')}' ({meta.get('year','?')}). "
@@ -1328,7 +1240,7 @@ class CriticAgent:
             f"Future work: {len(data['future_work'])}"
         )
 
-        # Step 1: Build ground truth index
+        # ground truth index
         self._think("Building ground truth index from structured data")
         self._act("build_ground_truth_index()")
         gt = build_ground_truth_index(data)
@@ -1338,7 +1250,7 @@ class CriticAgent:
             f"significance={gt['has_significance']}, repro={gt['has_reproducibility']}"
         )
 
-        # Step 2: Detect paper type
+        # Detect paper type
         self._think(f"Detecting paper type (backend: {self.llm_backend})")
         self._act("detect_paper_type()")
         paper_type = detect_paper_type(data, self.llm_backend, self.verbose)
@@ -1356,7 +1268,7 @@ class CriticAgent:
             react_trace   = self.trace,
         )
 
-        # Step 3: Heuristic layer (ground truth)
+        # Heuristic layer (ground truth)
         self._think("Running adaptive heuristic checks (Layer 1 — ground truth)")
         self._act("HeuristicChecker.run_all()")
         checker              = HeuristicChecker(data, paper_type, gt, verbose=self.verbose)
@@ -1370,7 +1282,7 @@ class CriticAgent:
             f"{sum(1 for w in heuristic_weaknesses if w.severity==Severity.LOW)} LOW)"
         )
 
-        # Step 4: LLM enrichment with hallucination filtering
+        # LLM enrichment with hallucination filtering
         self._think(f"LLM backend: '{self.llm_backend}'. Running filtered enrichment.")
 
         if self.llm_backend == "ollama":
@@ -1429,7 +1341,7 @@ class CriticAgent:
         else:
             self._think("No LLM backend — heuristic-only output.")
 
-        # Step 5: Finalise
+        # Finalise
         self._think("Computing summary and overall quality score.")
         result.compute_summary()
         self._observe(
@@ -1452,9 +1364,7 @@ class CriticAgent:
         return result , data
 
     def as_langgraph_node(self):
-        """
-        Returns a callable for graph.add_node("critic", node_fn).
-        """
+        #Returns a callable for graph.add_node("critic", node_fn).
         agent = self
 
         def node_fn(state: dict) -> dict:
@@ -1514,9 +1424,7 @@ class CriticAgent:
 
         return node_fn
 
-# ─────────────────────────────────────────────
 #  OUTPUT WRITER
-# ─────────────────────────────────────────────
 
 def save_critique(result: CritiqueResult, output_dir: pathlib.Path) -> pathlib.Path:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1533,27 +1441,13 @@ def save_critique(result: CritiqueResult, output_dir: pathlib.Path) -> pathlib.P
     return out_path
 
 
-
-
 def save_enriched_paper_json(
     result: CritiqueResult,
     original_claims_path: str | pathlib.Path,
     data: dict,
     verbose: bool = False,
 ) -> pathlib.Path | None:
-    """
-    Write-back: load the original claims_output.json, inject the critique
-    results as a new "critiques" key, and save as {paper_id}_enriched.json
-    in the same folder.
 
-    This is the shared memory update step — downstream agents (gap detector,
-    writer) read the enriched JSON instead of the bare claims JSON.
-
-    Never mutates the original file. Writes to a separate _enriched.json.
-
-    TODO (Phase 4): Also update knowledge graph with has_weakness edges
-    once the comparator agent and graph are available.
-    """
     original_path = pathlib.Path(original_claims_path)
     if not original_path.exists():
         if verbose:
@@ -1563,7 +1457,7 @@ def save_enriched_paper_json(
     try:
         paper_data = data
 
-        # Build the critiques array — one entry per accepted weakness
+        # the critiques array 
         critiques_array = []
         for w in result.weaknesses:
             sev = w.severity.value if hasattr(w.severity, "value") else str(w.severity)
@@ -1597,23 +1491,20 @@ def save_enriched_paper_json(
                 w.weakness_type for w in result.weaknesses
                 if (w.severity.value if hasattr(w.severity, "value") else w.severity) == "HIGH"
             ],
-            # TODO (planner): coverage_signal field will be added here
-            # when planner_agent.py is built and its expected format is known.
         }
 
-        # Save as enriched copy — never overwrite original
         out_path = original_path.parent / f"{result.paper_id}_enriched.json"
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(paper_data, f, indent=2, ensure_ascii=False, default=str)
 
         if verbose:
-            print(f"  [write-back] ✅ Enriched JSON saved: {out_path}")
+            print(f"  [write-back] Enriched JSON saved: {out_path}")
 
         return out_path
 
     except Exception as e:
         if verbose:
-            print(f"  [write-back] ⚠ Write-back failed: {e}")
+            print(f"  [write-back] Write-back failed: {e}")
         return None
 
 def print_summary(result: CritiqueResult):
@@ -1659,10 +1550,6 @@ def print_summary(result: CritiqueResult):
     print("\n" + "═" * 64)
 
 
-# ─────────────────────────────────────────────
-#  CLI
-# ─────────────────────────────────────────────
-
 def detect_llm_backend() -> str:
     if os.environ.get("OLLAMA_HOST") or _ollama_is_reachable():
         return "ollama"
@@ -1699,11 +1586,9 @@ Examples:
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
-    # Allow CLI override of Ollama host
     if args.ollama_host:
         os.environ["OLLAMA_HOST"] = args.ollama_host
         import importlib, sys as _sys
-        # Refresh module-level OLLAMA_HOST constant
         globals()["OLLAMA_HOST"] = args.ollama_host
 
     backend = "none" if args.no_llm else (
@@ -1721,20 +1606,20 @@ Examples:
     try:
         result, data = agent.run(args.input)
     except FileNotFoundError as e:
-        print(f"\n❌ {e}", file=sys.stderr); sys.exit(1)
+        print(f"\n {e}", file=sys.stderr); sys.exit(1)
     except ValueError as e:
-        print(f"\n❌ Invalid input: {e}", file=sys.stderr); sys.exit(1)
+        print(f"\n Invalid input: {e}", file=sys.stderr); sys.exit(1)
 
     print_summary(result)
     out_path = save_critique(result, pathlib.Path(args.output_dir))
-    print(f"\n  ✅ Saved to: {out_path}")
+    print(f"\n   Saved to: {out_path}")
 
     # Write-back: inject critique into the original paper JSON
     enriched_path = save_enriched_paper_json(result, args.input,data,verbose=args.verbose)
     if enriched_path:
-        print(f"  ✅ Enriched paper JSON: {enriched_path}\n")
+        print(f"  Enriched paper JSON: {enriched_path}\n")
     else:
-        print(f"  ⚠ Write-back skipped (original file not found)\n")
+        print(f"  Write-back skipped (original file not found)\n")
 
 
 if __name__ == "__main__":

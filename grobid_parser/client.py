@@ -8,18 +8,14 @@ import requests
 
 
 class GROBIDClient:
-    """
-    Sends PDFs to GROBID and returns raw TEI XML.
+   
+    #Sends PDFs to GROBID and returns raw TEI XML.
 
-    Parameters
-    ----------
-    base_url : str
-        URL of the running GROBID service. Default: http://localhost:8070
-    timeout : int
-        Seconds to wait per request. 
-    max_retries : int
-        Retry count on 503 (GROBID overloaded) or timeout.
-    """
+    #Parameters
+    #base_url : str -    URL of the running GROBID service. 
+    #timeout : int -    Seconds to wait per request. 
+    #max_retries : int -    Retry count on 503 (GROBID overloaded) or timeout.
+
 
     def __init__(
         self,
@@ -33,7 +29,7 @@ class GROBIDClient:
 
 
     def is_alive(self) -> bool:
-        """Return True if GROBID service is reachable and ready."""
+        #Return True if GROBID service is reachable and ready.
         try:
             r = requests.get(f"{self.base_url}/api/isalive", timeout=5)
             return r.status_code == 200 and r.text.strip().lower() == "true"
@@ -45,19 +41,7 @@ class GROBIDClient:
         pdf_path: Union[str, Path],
         consolidate_header: bool = True,
     ) -> Optional[str]:
-        """
-        Send a PDF to GROBID's processFulltextDocument endpoint.
-
-        Parameters
-        ----------
-        pdf_path : path to the PDF file
-        consolidate_header : if True, GROBID enriches title/author/year
-            via CrossRef lookup. 
-
-        Returns
-        -------
-        TEI XML string on success, None on failure.
-        """
+        
         pdf_path = Path(pdf_path)
         if not pdf_path.exists():
             print(f"[GROBID] Error: PDF not found: {pdf_path}")

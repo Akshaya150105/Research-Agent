@@ -1,29 +1,3 @@
-"""
-entity_resolver.py  v2.0.0
-===========================
-Folder: agents/
-
-v2.0.0 fixes three bugs from v1.0.0:
-
-BUG 1 — Fixed waterfall type-trying
-  Old: try metric → if fail, try dataset → if fail, try method
-  Problem: "BLEU" fails metric at sim=0.657 → gets tried as dataset
-           → accidentally resolves to a dataset → breaks contradiction
-  Fix: try ALL types, return highest similarity winner
-
-BUG 2 — Missing domain knowledge
-  "BLEU" should ALWAYS be tried as a metric first.
-  "WMT" should ALWAYS be tried as a dataset first.
-  Fix: KNOWN_METRIC_PATTERNS and KNOWN_DATASET_PATTERNS as fast-path guards.
-
-BUG 3 — generalize() function in comparator
-  The old `generalize()` stripped "score" from "bleu score" producing "bleu",
-  then matched it against a different "bleu" key from another paper.
-  The dataset key "bleuscore" appeared because normalization collapsed
-  metric and dataset names together — producing 12 nonsense contradictions.
-  Fix: remove generalize() entirely. Use resolver + exact canonical key matching.
-"""
-
 from __future__ import annotations
 
 import pathlib
@@ -38,10 +12,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 MATCH_THRESHOLD = 0.75
 N_CANDIDATES    = 3
-
-# ── Domain knowledge guards ───────────────────────────────────
-# These patterns force the correct entity_type BEFORE trying ChromaDB.
-# Prevents "BLEU" from being tried as dataset/method at all.
 
 KNOWN_METRIC_PATTERNS = re.compile(
     r"^(bleu|rouge[\-\d]*|f[\-\s]?1|f\d|accuracy|perplexity|ppl|"
@@ -63,16 +33,8 @@ KNOWN_DATASET_PATTERNS = re.compile(
 
 
 class EmbeddingEntityResolver:
-    """
-    Resolves raw entity strings from claim["entities_involved"] to
-    canonical forms in ChromaDB entities_global.
-
-    Key design decisions in v2.0.0:
-      - Domain knowledge patterns guard the most common metric/dataset names
-      - All entity types compete by similarity; highest winner is chosen
-      - String fallback uses exact then substring matching
-      - Results cached per (raw, type, paper_id) for session efficiency
-    """
+    
+    #Resolves raw entity strings from claim["entities_involved"] to canonical forms in ChromaDB entities_global.
 
     def __init__(self, verbose: bool = False):
         self.verbose      = verbose
@@ -81,7 +43,7 @@ class EmbeddingEntityResolver:
         self._embedder_fn              = None
         self._available: Optional[bool] = None
 
-    # ── RAG init ──────────────────────────────────────────────
+    # RAG init 
 
     def _init_rag(self) -> bool:
         if self._available is not None:
@@ -105,7 +67,7 @@ class EmbeddingEntityResolver:
         if self.verbose:
             print(f"  [resolver] {msg}")
 
-    # ── Public API ────────────────────────────────────────────
+    # Public API
 
     def resolve_claim(
         self,
@@ -113,15 +75,7 @@ class EmbeddingEntityResolver:
         paper_id: str,
         typed:    dict[str, set],
     ) -> dict:
-        """
-        Resolve all strings in claim["entities_involved"].
-        Returns {metric: str|None, dataset: str|None, methods: list}.
-
-        Algorithm per entity string:
-          1. KNOWN_METRIC_PATTERNS match → try metric only
-          2. KNOWN_DATASET_PATTERNS match → try dataset only
-          3. Otherwise → compete all types, take highest sim winner
-        """
+        
         resolved: dict = {"metric": None, "dataset": None, "methods": []}
 
         for raw in claim.get("entities_involved", []):
@@ -129,7 +83,7 @@ class EmbeddingEntityResolver:
             if not raw:
                 continue
 
-            # Guard 1: known metric
+            # known metric
             if KNOWN_METRIC_PATTERNS.match(raw):
                 if resolved["metric"] is None:
                     canon, _ = self._best_match(raw, ["metric"], paper_id, typed)
@@ -139,7 +93,7 @@ class EmbeddingEntityResolver:
                 # Metric slot full — ignore, it's not a dataset or method
                 continue
 
-            # Guard 2: known dataset
+            # known dataset
             if KNOWN_DATASET_PATTERNS.match(raw):
                 if resolved["dataset"] is None:
                     canon, _ = self._best_match(raw, ["dataset"], paper_id, typed)
@@ -148,7 +102,7 @@ class EmbeddingEntityResolver:
                         continue
                 continue
 
-            # General: compete all unfilled types
+            # compete all unfilled types
             types_to_try = []
             if resolved["metric"]  is None: types_to_try.append("metric")
             if resolved["dataset"] is None: types_to_try.append("dataset")
@@ -171,7 +125,7 @@ class EmbeddingEntityResolver:
         resolved = normalize_resolved(resolved)
         return resolved
 
-    # ── Internal resolution ───────────────────────────────────
+    #  Internal resolution
 
     def _best_match(
         self,
@@ -180,7 +134,7 @@ class EmbeddingEntityResolver:
         paper_id:   str,
         typed:      dict[str, set],
     ) -> tuple[Optional[str], float]:
-        """Try given types, return (best_canonical, best_similarity)."""
+        # return (best_canonical, best_similarity).
         best_canon = None
         best_sim   = 0.0
 
@@ -200,7 +154,7 @@ class EmbeddingEntityResolver:
         paper_id: str,
         typed:    dict[str, set],
     ) -> Optional[str]:
-        """Return which entity_type gave the highest similarity for raw."""
+        #Return which entity_type gave the highest similarity for raw.
         best_type = None
         best_sim  = 0.0
 
@@ -220,10 +174,10 @@ class EmbeddingEntityResolver:
         paper_id:     str,
         fallback_keys: set,
     ) -> tuple[Optional[str], float]:
-        """
-        Resolve raw against one entity_type.
-        Returns (canonical, similarity). Caches result.
-        """
+        
+        #Resolve raw against one entity_type.
+        #Returns (canonical, similarity). Caches result.
+        
         cache_key = (raw.lower().strip(), entity_type, paper_id)
         if cache_key in self._cache:
             return self._cache[cache_key]
@@ -281,11 +235,11 @@ class EmbeddingEntityResolver:
 
 
 def get_typed_entities(paper: dict) -> dict[str, set]:
-    """
-    Extract typed entity sets from claims_output.json.
-    Returns {methods, datasets, metrics, tasks} — all lowercase.
-    Used as string-fallback keys by EmbeddingEntityResolver.
-    """
+    
+    #Extract typed entity sets from claims_output.json.
+    #Returns {methods, datasets, metrics, tasks} — all lowercase.
+    #Used as string-fallback keys by EmbeddingEntityResolver.
+    
     for key in ("entity_index", "llm_entity_index"):
         ei = paper.get(key)
         if ei and isinstance(ei, dict):
