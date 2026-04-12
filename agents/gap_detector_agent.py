@@ -14,6 +14,12 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Any
 
+try:
+    from gap_selector_rl import GapSelectorRL, session_context_from_papers
+    _RL_AVAILABLE = True
+except ImportError:
+    _RL_AVAILABLE = False
+
 import requests
 from dotenv import load_dotenv
 
@@ -103,8 +109,7 @@ class GapResult:
             "high_priority_gaps": high_count,
             "gap_types":          counts,
             "recommended_next": (
-                "run_comparator" if self.n_papers >= 2
-                else "add_more_papers" if len(self.gaps) < 2
+                "add_more_papers" if len(self.gaps) < 2
                 else "write_review"
             ),
             "coverage_note": (
@@ -192,20 +197,40 @@ def classify_method(m: str) -> str:
 
 def is_meaningful_limitation(text: str) -> bool:
     text = text.lower()
-    weak_phrases = [
-        "future work", "we plan", "we will",
-        "might be", "could be", "small number",
-        "only a few", "limited experiments",
-    ]
-    if any(p in text for p in weak_phrases):
-        return False
+
+    # Hard-reject hyper-parameter tuning details — these are never research gaps
     if any(x in text for x in ["d_k", "beam size", "dropout", "label smoothing"]):
         return False
+
     strong_signals = [
+        # original signals
         "scalability", "generalization", "long-range",
         "sequential", "parallelization", "efficiency",
+        # broader coverage — modality, scope, cost, capability limits
+        "modalities", "tasks beyond", "not tested", "restricted to",
+        "only evaluated", "computational cost", "training cost",
+        "cannot handle", "lack of", "absence of", "limited to",
+        "does not", "unable to", "fixed-length", "quadratic",
+        "out-of-domain", "domain", "interpretability", "explainab",
+        "low-resource", "multimodal", "multi-modal", "structured",
+        "variable-length", "memory", "context length", "generalise",
+        "generaliz", "require", "constraint", "limitation",
+        "beyond translation", "non-english", "other languages",
     ]
-    return any(s in text for s in strong_signals)
+
+    has_strong = any(s in text for s in strong_signals)
+
+    # Weak phrases only disqualify when NO strong signal is present.
+    # A sentence like "we plan to address scalability" IS meaningful.
+    if not has_strong:
+        weak_phrases = [
+            "might be", "could be", "small number",
+            "only a few", "limited experiments",
+        ]
+        if any(p in text for p in weak_phrases):
+            return False
+
+    return has_strong
 
 
 def extract_entity_sets(paper: dict) -> dict:
@@ -645,6 +670,14 @@ class LimitationGapDetector:
                 cluster   = [lim]
                 assigned[i] = True
 
+                # When only 1 paper is loaded all ChromaDB results share the
+                # same paper_id — skipping them would leave every cluster at
+                # size 1 with no cross-paper evidence.  We therefore only
+                # enforce the cross-paper filter when multiple papers are
+                # present in the session.
+                unique_paper_ids = {lm["paper_id"] for lm in limitations}
+                require_cross_paper = len(unique_paper_ids) > 1
+
                 # Use embedding distance — no Jaccard double-similarity
                 for dist, meta, doc in zip(
                     results["distances"][0],
@@ -654,14 +687,15 @@ class LimitationGapDetector:
                     if dist > LIMITATION_CLUSTER_THRESHOLD:
                         continue
 
-                    if meta.get("paper_id") == lim["paper_id"]:
+                    # Skip same-paper hits only in multi-paper sessions
+                    if require_cross_paper and meta.get("paper_id") == lim["paper_id"]:
                         continue
 
                     # Match the DB result back to our local limitation list
                     for j, other in enumerate(limitations):
                         if assigned[j]:
                             continue
-                        # Exact text match to map DB doc - local lim
+                        # Exact text match to map DB doc → local lim
                         if other["text"].strip().lower() == doc.strip().lower():
                             cluster.append(other)
                             assigned[j] = True
@@ -756,10 +790,16 @@ class LimitationGapDetector:
             priority  = (
                 GapPriority.HIGH   if n >= 3
                 else GapPriority.MEDIUM if n >= 2
-                else GapPriority.LOW
+                else GapPriority.MEDIUM   # single-paper limitation gaps are still worth surfacing
             )
             addressed  = self._check_addressed(cluster)
-            confidence = 0.55 if len(cluster) == 1 else 0.85 if len(cluster) >= 3 else 0.70
+            # Single-paper gaps get 0.65 (was 0.55) so they survive the
+            # MIN_GAP_CONFIDENCE=0.4 floor even after a small LLM adjustment,
+            # and don't get needs_review=True just for being single-paper.
+            confidence = 0.65 if len(cluster) == 1 else 0.85 if len(cluster) >= 3 else 0.70
+            # Only flag needs_review when confidence is genuinely low (< 0.5),
+            # not merely because the cluster spans a single paper.
+            needs_review_flag = confidence < 0.50
 
             gaps.append(Gap(
                 gap_id            = f"gap_lim_{uuid.uuid4().hex[:6]}",
@@ -786,7 +826,7 @@ class LimitationGapDetector:
                 ][:6],
                 confidence        = confidence,
                 addressed_status  = addressed,
-                needs_review      = confidence < 0.6,
+                needs_review      = needs_review_flag,
             ))
 
         self._log(f"Found {len(gaps)} limitation-based gap(s)")
@@ -1087,6 +1127,9 @@ class GapDetectorAgent:
         self.llm_backend = llm_backend
         self.verbose     = verbose
         self.trace: list[str] = []
+        self.use_rl = _RL_AVAILABLE
+        if self.use_rl:
+            self._rl_selector = GapSelectorRL.load_or_train(verbose=self.verbose)
 
     def _think(self, msg: str):
         entry = f"[THINK] {msg}"
@@ -1279,11 +1322,39 @@ class GapDetectorAgent:
         else:
             self._think("No LLM — heuristic gaps only")
 
-        # Sort and cap
-        self._think("Sorting by priority and confidence")
-        priority_order = {GapPriority.HIGH: 0, GapPriority.MEDIUM: 1, GapPriority.LOW: 2}
-        result.gaps.sort(key=lambda g: (priority_order[g.priority], -g.confidence))
-        result.gaps = result.gaps[:25]  # cap at 25 for output quality
+        # Step 8: RL re-ranking (or heuristic fallback)
+        self._think("Step 8: Ranking gaps")
+        if self.use_rl:
+            self._act("GapSelectorRL.select()")
+            ctx = session_context_from_papers(
+                papers,
+                comp_ctx=comp_ctx,
+                used_gap_matrix=GAP_MATRIX_PATH.exists(),
+            )
+            # Build contradiction entity set from comparator context
+            paper_datasets = {
+                es["paper_id"]: es["datasets"]
+                for es in entity_sets
+            }
+            contradiction_ents = set()
+            for c in comp_ctx.get("contradictions", []):
+                contradiction_ents.update(
+                    [c.get("method", "")] +
+                    list(paper_datasets.get(c.get("paper_a", ""), set())) +
+                    list(paper_datasets.get(c.get("paper_b", ""), set()))
+                )
+            result.gaps = self._rl_selector.select(
+                result.gaps,
+                ctx,
+                top_k=15,
+                contradiction_entity_set=contradiction_ents,
+            )
+            self._observe(f"RL selected {len(result.gaps)} gaps")
+        else:
+            # Heuristic fallback (original behaviour)
+            priority_order = {GapPriority.HIGH: 0, GapPriority.MEDIUM: 1, GapPriority.LOW: 2}
+            result.gaps.sort(key=lambda g: (priority_order[g.priority], -g.confidence))
+            result.gaps = result.gaps[:25]
 
         result.compute_summary()
         self._observe(
