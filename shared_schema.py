@@ -25,6 +25,11 @@ USAGE:
 
   conn = sqlite3.connect("shared_memory/research.db")
   ensure_schema(conn)
+
+CHANGELOG:
+  v2 — Added RL tables: rl_episodes, rl_decisions (Phase 8 / RL integration)
+       Both tables are append-only; the planner writes one rl_episodes row
+       per session and one rl_decisions row per agent-selection step.
 """
 
 import sqlite3
@@ -151,6 +156,54 @@ CREATE TABLE IF NOT EXISTS session_log (
     confidence     REAL    DEFAULT 1.0,
     duration_ms    INTEGER DEFAULT 0
 );
+
+-- ────────────────────────────────────────────────────────────
+--  RL TABLES  (Phase 8 — LinUCB Contextual Bandit)
+-- ────────────────────────────────────────────────────────────
+
+-- ── RL Episodes ───────────────────────────────────────────────
+-- One row per planner session.
+-- reward and reward_breakdown are NULL until the session completes
+-- and compute_reward() is called; they are then UPDATE-d in place.
+--
+-- reward_breakdown: JSON dict mapping component name → sub-score,
+--   e.g. {"contradiction_yield": 0.4, "critique_depth": 0.6, ...}
+--   Useful for debugging which reward component drove policy change.
+CREATE TABLE IF NOT EXISTS rl_episodes (
+    episode_id          TEXT PRIMARY KEY,
+    session_id          TEXT NOT NULL,
+    timestamp           TEXT DEFAULT (datetime('now')),
+    -- State snapshot at episode start (for analysis / replay)
+    paper_count         INTEGER DEFAULT 0,
+    claim_count         INTEGER DEFAULT 0,
+    entity_count        INTEGER DEFAULT 0,
+    contradiction_count INTEGER DEFAULT 0,
+    critique_count      INTEGER DEFAULT 0,
+    gap_count           INTEGER DEFAULT 0,
+    -- Outcome
+    agents_invoked      INTEGER DEFAULT 0,   -- total specialist agent calls
+    reward              REAL,                -- scalar in [0,1]; NULL until end
+    reward_breakdown    TEXT DEFAULT '{}',   -- JSON component scores
+    notes               TEXT DEFAULT ''
+);
+
+-- ── RL Decisions ──────────────────────────────────────────────
+-- One row per agent-selection step within an episode.
+-- Provides a full audit trail of what the policy chose and why.
+--
+-- state_vector: JSON float array (length STATE_DIM=11)
+-- prob_vector : JSON float array (length N_ACTIONS=5), softmax of UCB scores
+--               Sums to 1.0; shows how confident the policy was.
+CREATE TABLE IF NOT EXISTS rl_decisions (
+    decision_id  TEXT PRIMARY KEY,
+    episode_id   TEXT NOT NULL REFERENCES rl_episodes(episode_id),
+    step         INTEGER NOT NULL,        -- 0-indexed within the episode
+    state_vector TEXT NOT NULL,           -- JSON array, length 11
+    action       TEXT NOT NULL,           -- e.g. "run_comparator"
+    action_index INTEGER NOT NULL,        -- integer index into ACTIONS list
+    prob_vector  TEXT NOT NULL,           -- JSON array, length 5
+    timestamp    TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -181,6 +234,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         ("session_log", "output_summary", "TEXT DEFAULT ''"),
         ("session_log", "confidence",     "REAL DEFAULT 1.0"),
         ("session_log", "duration_ms",    "INTEGER DEFAULT 0"),
+        # rl_episodes — columns that may be missing from pre-RL DBs
+        ("rl_episodes", "agents_invoked",      "INTEGER DEFAULT 0"),
+        ("rl_episodes", "reward_breakdown",    "TEXT DEFAULT '{}'"),
+        ("rl_episodes", "contradiction_count", "INTEGER DEFAULT 0"),
+        ("rl_episodes", "critique_count",      "INTEGER DEFAULT 0"),
+        ("rl_episodes", "gap_count",           "INTEGER DEFAULT 0"),
+        ("rl_episodes", "notes",               "TEXT DEFAULT ''"),
     ]
 
     for table, column, col_def in _add_column_if_missing:

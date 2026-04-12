@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import datetime
 import json
@@ -11,14 +9,14 @@ import uuid
 from typing import TypedDict, Annotated
 import operator
 
-# LangGraph 
+#LangGraph
 try:
     from langgraph.graph import StateGraph, END
     LANGGRAPH_AVAILABLE = True
 except ImportError:
     LANGGRAPH_AVAILABLE = False
     print(
-        "  langgraph not installed. Run: pip install langgraph\n"
+        "⚠  langgraph not installed. Run: pip install langgraph\n"
         "   Planner will run in sequential fallback mode.",
         file=sys.stderr,
     )
@@ -32,9 +30,9 @@ if str(_PROJECT_ROOT) not in sys.path:
 if str(_AGENTS_DIR) not in sys.path:
     sys.path.insert(0, str(_AGENTS_DIR))
 
-# Agent imports 
-from reader_agent     import ReaderAgent
-from writer_agent     import WriterAgent
+#Agent imports
+from reader_agent import ReaderAgent
+from writer_agent import WriterAgent
 from comparator_agent import ComparatorAgent
 import comparator_agent as _comp_module   
 
@@ -52,12 +50,29 @@ except ImportError:
     GAP_AVAILABLE = False
     print("  gap_detector_agent not found — gap step skipped.", file=sys.stderr)
 
+
+try:
+    from planner_rl.bandit_policy    import LinUCBPolicy
+    # from planner_rl.ppo_policy import PPOPolicy as LinUCBPolicy
+    from planner_rl.state_encoder    import get_state_vector, ACTIONS, ACTION_INDEX
+    from planner_rl.reward_calculator import compute_reward
+    RL_AVAILABLE = True
+except ImportError as _rl_err:
+    RL_AVAILABLE = False
+    print(
+        f"  RL modules not available ({_rl_err}). "
+        "Planner will use fixed-sequence routing.",
+        file=sys.stderr,
+    )
+
 MEMORY_DIR    = pathlib.Path("memory")
 SHARED_MEMORY = pathlib.Path("shared_memory")
 DB_PATH       = SHARED_MEMORY / "research.db"
 
+MAX_RL_STEPS = 6
+RL_WEIGHTS_PATH = _PROJECT_ROOT / "rl" / "policy_weights.json"
 
-#  SHARED STATE
+#SHARED STATE
 class AgentState(TypedDict, total=False):
     
     #Single dict that flows through every LangGraph node.
@@ -86,10 +101,25 @@ class AgentState(TypedDict, total=False):
     session_complete: bool
 
     react_trace: Annotated[list, operator.add]
+    
+    rl_episode_id: str
+    agents_fired:  list
+    rl_decisions:  Annotated[list, operator.add]
 
 
-#  ROUTING LOGIC
+#ROUTING LOGIC
 class PlannerLogic:
+
+    # Class-level policy singleton — initialised once per process
+    _policy: "LinUCBPolicy | None" = None
+
+    @classmethod
+    def _get_policy(cls) -> "LinUCBPolicy | None":
+        if not RL_AVAILABLE:
+            return None
+        if cls._policy is None:
+            cls._policy = LinUCBPolicy(save_path=str(RL_WEIGHTS_PATH))
+        return cls._policy
 
     @staticmethod
     def build_state_vector(state: AgentState) -> list[float]:
@@ -111,22 +141,95 @@ class PlannerLogic:
             float(bool(state.get("gap_report"))),
         ]
 
-    @staticmethod
-    def route_after_reader(state: AgentState) -> str:
+    #RL helper
+
+    @classmethod
+    def _rl_select(
+        cls,
+        state:    AgentState,
+        step:     int,
+        allowed:  list[str],
+    ) -> str | None:
+
+        policy = cls._get_policy()
+        if policy is None:
+            return None
+
+        agents_fired = state.get("agents_fired", [])
+        all_actions = set(ACTIONS)
+        forbidden   = list((all_actions - set(allowed)) | set(agents_fired))
+
+        sv, probs = policy.select_action(
+            get_state_vector(state, agents_fired, DB_PATH),
+            forbidden=forbidden,
+        )
+
+        #decision record for DB logging
+        decision = {
+            "decision_id":  str(uuid.uuid4()),
+            "episode_id":   state.get("rl_episode_id", ""),
+            "step":         step,
+            "state_vector": get_state_vector(state, agents_fired, DB_PATH).tolist(),
+            "action":       sv,
+            "action_index": ACTION_INDEX[sv],
+            "prob_vector":  probs.tolist(),
+        }
         
-        #2 papers available → comparator.
-        #<2 papers → writer directly (nothing to compare).
-    
+        existing = state.setdefault("rl_decisions", [])
+        if isinstance(existing, list):
+            existing.append(decision)
+
+        return sv  
+   
+    @classmethod
+    def route_after_reader(cls, state: AgentState) -> str:
+ 
         rr    = state.get("reader_report", {})
         total = rr.get("papers_read", 0) + rr.get("papers_already_in_db", 0)
+
+        if RL_AVAILABLE and total >= 2:
+            chosen = cls._rl_select(state, step=0,
+                                    allowed=["run_comparator", "run_writer"])
+            if chosen == "run_comparator":
+                return "comparator"
+            if chosen == "run_writer":
+                return "writer"
         return "comparator" if total >= 2 else "writer"
 
-    @staticmethod
-    def route_after_comparator(state: AgentState) -> str:
+    @classmethod
+    def route_after_comparator(cls, state: AgentState) -> str:
+
+        available = []
+        if CRITIC_AVAILABLE:
+            available.append("run_critic")
+        if GAP_AVAILABLE:
+            available.append("run_gap_detector")
+        available.append("run_writer")  
+
+        if RL_AVAILABLE and available:
+            chosen = cls._rl_select(state, step=1, allowed=available)
+            mapping = {
+                "run_critic":       "critic",
+                "run_gap_detector": "gap_detector",
+                "run_writer":       "writer",
+            }
+            if chosen in mapping:
+                return mapping[chosen]
         return "critic" if CRITIC_AVAILABLE else "gap_detector"
 
-    @staticmethod
-    def route_after_critic(state: AgentState) -> str:
+    @classmethod
+    def route_after_critic(cls, state: AgentState) -> str:
+        available = []
+        if GAP_AVAILABLE:
+            available.append("run_gap_detector")
+        available.append("run_writer")
+
+        if RL_AVAILABLE and GAP_AVAILABLE:
+            chosen = cls._rl_select(state, step=2, allowed=available)
+            if chosen == "run_gap_detector":
+                return "gap_detector"
+            if chosen == "run_writer":
+                return "writer"
         return "gap_detector" if GAP_AVAILABLE else "writer"
 
     @staticmethod
@@ -137,17 +240,18 @@ class PlannerLogic:
     def route_after_writer(state: AgentState) -> str:
         return "end"
 
-
 #  LANGGRAPH NODE FUNCTIONS
 #  Each receives the full state dict, returns a PARTIAL update dict.
 #  LangGraph merges the partial update into the running state.
+
 def _vlog(state: AgentState, agent: str, msg: str) -> None:
     """Print a timestamped log line if verbose mode is on."""
     if state.get("verbose", False):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         print(f"  [{ts}][planner→{agent}] {msg}")
 
-#  LLM BACKEND DETECTION 
+#  LLM BACKEND DETECTION helpers
+
 def _detect_gemini_backend(use_llm: bool) -> str:
     return "gemini" if (use_llm and os.environ.get("GEMINI_API_KEY")) else "none"
 
@@ -166,11 +270,11 @@ def _detect_ollama_backend(use_llm: bool) -> str:
     return "none"
 
 def node_reader(state: AgentState) -> dict:
-    
+
     #Node 1 — Reader.
     #Scans memory/ for claims_output.json files, computes coverage gain
     #per paper, writes new papers to SQLite, returns coverage report.
-    
+
     _vlog(state, "reader", "Starting")
 
     agent = ReaderAgent(
@@ -178,7 +282,7 @@ def node_reader(state: AgentState) -> dict:
         db_path    = DB_PATH,
         verbose    = state.get("verbose", False),
     )
-    # full state passed
+    #full state passed
     updated = agent.run(dict(state))
 
     rr       = updated.get("reader_report", {})
@@ -204,7 +308,7 @@ def node_reader(state: AgentState) -> dict:
 
 
 def node_comparator(state: AgentState) -> dict:
-    
+ 
     _vlog(state, "comparator", "Starting")
 
     mem_path = pathlib.Path(state.get("memory_dir", "memory"))
@@ -265,7 +369,7 @@ def node_critic(state: AgentState) -> dict:
 
 
 def node_gap_detector(state: AgentState) -> dict:
-
+    
     _vlog(state, "gap_detector", "Starting")
 
     if not GAP_AVAILABLE:
@@ -288,10 +392,11 @@ def node_gap_detector(state: AgentState) -> dict:
 
 
 def node_writer(state: AgentState) -> dict:
-    
-    #Node 5 — Writer.
-    #Reads all structured outputs from SQLite + agent JSON files.
-    #Synthesises a Markdown literature review section by section.
+
+    # Node 5 — Writer.
+    # Reads all structured outputs from SQLite + agent JSON files.
+    # Synthesises a Markdown literature review section by section.
+   
     _vlog(state, "writer", "Starting")
 
     agent   = WriterAgent(verbose=state.get("verbose", False))
@@ -313,15 +418,14 @@ def node_writer(state: AgentState) -> dict:
 #  PLANNER AGENT
 
 class PlannerAgent:
-    
-    #Builds the LangGraph StateGraph and runs the full pipeline.
+    # Builds the LangGraph StateGraph and runs the full pipeline.
 
-    #Graph topology:
-    #  START → reader → comparator → critic → gap_detector → writer → END
+    # Graph topology:
+    #   START → reader → comparator → critic → gap_detector → writer → END
 
-    #Each edge is conditional — the route_after_* functions decide whether to skip an agent .
+    # Each edge is conditional — the route_after_* functions decide
 
-    VERSION = "1.1.0"
+    VERSION = "1.2.0"  
 
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
@@ -331,7 +435,7 @@ class PlannerAgent:
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             print(f"[{ts}][planner] {msg}")
 
-    # Graph construction
+    #  Graph construction 
 
     def build_graph(self):
         if not LANGGRAPH_AVAILABLE:
@@ -368,21 +472,23 @@ class PlannerAgent:
 
         return g.compile()
 
+    #  Session runner 
 
     def run(
         self,
         topic:      str  = "",
         memory_dir: str  = "memory",
-        papers_dir: str  = "data_1/papers",      
-        ollama_host: str = "",          
+        papers_dir: str  = "data_1/papers",      # NEW
+        ollama_host: str = "",          # NEW
         no_extraction: bool = False,
         use_llm:    bool = True,
     ) -> dict:
-
-        #Returns the final AgentState dict (all agent reports included).
         
-        session_id = str(uuid.uuid4())[:8]
-        self._print(f"Session {session_id} | topic='{topic}' | llm={use_llm}")
+        #Returns the final AgentState dict (all agent reports included).
+
+        session_id  = str(uuid.uuid4())[:8]
+        episode_id  = str(uuid.uuid4())          # ── RL: unique per session
+        self._print(f"Session {session_id} | topic='{topic}' | llm={use_llm} | rl={RL_AVAILABLE}")
 
         resolved_ollama = (
             ollama_host 
@@ -393,10 +499,10 @@ class PlannerAgent:
         initial: AgentState = {
             "session_id":              session_id,
             "topic":                   topic,
-            "papers_dir":              papers_dir,      
+            "papers_dir":              papers_dir,
             "memory_dir":              memory_dir,
-            "ollama_host":             resolved_ollama, 
-            "no_extraction":           no_extraction or (not use_llm), 
+            "ollama_host":             resolved_ollama,
+            "no_extraction":           no_extraction or (not use_llm),
             "use_llm":                 use_llm,
             "verbose":                 self.verbose,
             "step_count":              0,
@@ -404,6 +510,10 @@ class PlannerAgent:
             "coverage_gain_threshold": 0.10,
             "session_complete":        False,
             "react_trace":             [],
+            #  RL tracking fields 
+            "rl_episode_id": episode_id,
+            "agents_fired":  [],       
+            "rl_decisions":  [],       
         }
 
         if LANGGRAPH_AVAILABLE:
@@ -415,40 +525,182 @@ class PlannerAgent:
             final_state = self._sequential_fallback(initial)
 
         self._write_session_log(final_state)
+
+        #  RL post-session: compute reward and update policy weights 
+        if RL_AVAILABLE:
+            self._rl_post_session(final_state, episode_id, session_id)
+
         self._print_summary(final_state)
         print("LOG DB =", DB_PATH)
         return final_state
+
+    #  RL post-session persistence and policy update 
+
+    def _rl_post_session(
+        self,
+        state:      AgentState,
+        episode_id: str,
+        session_id: str,
+    ) -> None:
+     
+        # 1. Locates the review file the Writer produced 
+        wr          = state.get("writer_report", {})
+        review_path = wr.get("output_path", "")
+        n_invoked   = state.get("step_count", 0) - 1  
+
+        reward, breakdown = compute_reward(
+            db_path           = DB_PATH,
+            session_id        = session_id,
+            review_path       = review_path or None,
+            agent_invocations = max(n_invoked, 0),
+            verbose           = self.verbose,
+        )
+
+        # 2. Persists episode summary 
+        self._rl_log_episode(episode_id, session_id, reward, breakdown, n_invoked)
+
+        # 3. Persists per-step decisions 
+        decisions = state.get("rl_decisions", [])
+        self._rl_log_decisions(decisions)
+
+        # 4. Updates LinUCB policy weights 
+        policy = PlannerLogic._get_policy()
+        if policy is not None:
+            for d in decisions:
+                import numpy as _np
+                sv = _np.array(d["state_vector"], dtype=_np.float32)
+                policy.update(sv, d["action_index"], reward)
+
+        # 5. Summary line 
+        self._print(
+            f"RL update complete — reward={reward:.4f} | "
+            f"decisions={len(decisions)} | "
+            f"weights - {RL_WEIGHTS_PATH}"
+        )
+        print(
+            f"  [rl] reward={reward:.4f}  "
+            + "  ".join(f"{k}={v:.2f}" for k, v in breakdown.items())
+        )
+
+    def _rl_log_episode(
+        self,
+        episode_id:  str,
+        session_id:  str,
+        reward:      float,
+        breakdown:   dict[str, float],
+        n_invoked:   int,
+    ) -> None:
+        #Inserts or updates the rl_episodes row for this session
+        if not DB_PATH.exists():
+            return
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            cur  = conn.cursor()
+
+            def _count(table: str) -> int:
+                try:
+                    return cur.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                except sqlite3.OperationalError:
+                    return 0
+
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO rl_episodes
+                    (episode_id, session_id, timestamp,
+                     paper_count, claim_count, entity_count,
+                     contradiction_count, critique_count, gap_count,
+                     agents_invoked, reward, reward_breakdown)
+                VALUES (?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    episode_id,
+                    session_id,
+                    _count("papers"),
+                    _count("claims"),
+                    _count("entities"),
+                    _count("comparisons"),
+                    _count("critiques") if self._table_exists(cur, "critiques") else 0,
+                    _count("gaps")      if self._table_exists(cur, "gaps")      else 0,
+                    n_invoked,
+                    reward,
+                    json.dumps(breakdown),
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            print(f"  [rl] episode log failed: {exc}", file=sys.stderr)
+
+    def _rl_log_decisions(self, decisions: list[dict]) -> None:
+        #Inserts one rl_decisions row per policy step.
+        if not decisions or not DB_PATH.exists():
+            return
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            for d in decisions:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO rl_decisions
+                        (decision_id, episode_id, step,
+                         state_vector, action, action_index, prob_vector)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        d["decision_id"],
+                        d["episode_id"],
+                        d["step"],
+                        json.dumps(d["state_vector"]),
+                        d["action"],
+                        d["action_index"],
+                        json.dumps(d["prob_vector"]),
+                    ),
+                )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            print(f"  [rl] decision log failed: {exc}", file=sys.stderr)
+
+    @staticmethod
+    def _table_exists(cur: sqlite3.Cursor, table: str) -> bool:
+        row = cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table,)
+        ).fetchone()
+        return row is not None
 
     # Sequential fallback (no LangGraph) 
 
     def _sequential_fallback(self, state: AgentState) -> AgentState:
         
         #Same logic as the graph but without LangGraph overhead.
-       
+ 
         state = {**state, **node_reader(state)}
 
         route = PlannerLogic.route_after_reader(state)
 
         if route == "comparator":
             state = {**state, **node_comparator(state)}
+            state["agents_fired"] = state.get("agents_fired", []) + ["run_comparator"]
             route = PlannerLogic.route_after_comparator(state)
 
             if route == "critic":
                 state = {**state, **node_critic(state)}
+                state["agents_fired"] = state.get("agents_fired", []) + ["run_critic"]
                 route = PlannerLogic.route_after_critic(state)
 
                 if route == "gap_detector":
                     state = {**state, **node_gap_detector(state)}
-                # else → writer (gap not available)
-
+                    state["agents_fired"] = state.get("agents_fired", []) + ["run_gap_detector"]
+                
             elif route == "gap_detector":
-                # critic not available, jumped straight to gap
                 state = {**state, **node_gap_detector(state)}
+                state["agents_fired"] = state.get("agents_fired", []) + ["run_gap_detector"]
 
         state = {**state, **node_writer(state)}
+        state["agents_fired"] = state.get("agents_fired", []) + ["run_writer"]
         return state
 
-    # Session log written to SQLite 
+    # Session log write to SQLite 
 
     def _write_session_log(self, state: AgentState) -> None:
         if not DB_PATH.exists():
@@ -481,7 +733,7 @@ class PlannerAgent:
         except Exception as e:
             print(f"  [planner] session_log write failed: {e}", file=sys.stderr)
 
-
+    
     def _print_summary(self, state: AgentState) -> None:
         rr = state.get("reader_report",     {})
         cr = state.get("comparator_report", {})
@@ -506,6 +758,9 @@ class PlannerAgent:
         print(f"  Research gaps       : {n_gaps}")
         print(f"  Steps taken         : {state.get('step_count', 0)}")
         print(f"  Session complete    : {state.get('session_complete', False)}")
+        if RL_AVAILABLE:
+            print(f"  RL decisions taken  : {len(state.get('rl_decisions', []))}")
+            print(f"  RL episode ID       : {state.get('rl_episode_id', 'n/a')}")
         if out_path:
             print(f"  Review saved at     : {out_path}")
         print("═" * 64)
@@ -522,9 +777,9 @@ def main():
     )
     parser.add_argument("--topic",      default="")
     parser.add_argument("--memory-dir", default="memory")
-    parser.add_argument("--papers-dir", default="data_1/papers", help="Where raw PDFs live") 
-    parser.add_argument("--ollama-host", default="", help="Ollama URL")
-    parser.add_argument("--no-extraction", action="store_true", help="Skip PDF processing") 
+    parser.add_argument("--papers-dir", default="data_1/papers", help="Where raw PDFs live") # NEW
+    parser.add_argument("--ollama-host", default="", help="Ollama URL") # NEW
+    parser.add_argument("--no-extraction", action="store_true", help="Skip PDF processing") # NEW
     parser.add_argument("--no-llm",     action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
