@@ -4,50 +4,29 @@ A local vector database pipeline that turns structured paper JSONs from Phase 1 
 
 ## 1. Folder structure and file map
 
-```
-
+ChromaDB Client
 │
-├── pipeline.py              ← THE ENTRY POINT. Start here.
-│                               index_paper(), enrich(), query(), status()
-│                               agents and tests only call this file
+├─ Collection: paper_sections (2000 docs)
+│  ├─ Section chunks from all papers
+│  ├─ Figure captions from all papers
+│  └─ [indexed with HNSW for fast search]
 │
-├── chunker.py               ← Step 1. JSON files → chunk dicts
-│                               reads 3 source files, produces typed list
-│                               nothing embedded or stored here
+├─ Collection: claims_and_findings (5000 docs)
+│  ├─ Claim chunks
+│  ├─ Limitation chunks
+│  ├─ Future work chunks
+│  └─ [indexed with HNSW for fast search]
 │
-├── embedder.py              ← Step 2. chunk dicts → vectors
-│                               adds "embedding": [768 floats] to each chunk
-│                               also embeds queries at retrieval time
+├─ Collection: entities_global (3000 docs)
+│  ├─ Method entities
+│  ├─ Dataset entities
+│  ├─ Metric entities
+│  └─ [indexed with HNSW for fast search]
 │
-├── indexer.py               ← Step 3. chunks → ChromaDB
-│                               routes each chunk type to the right collection
-│                               idempotent upsert using SHA-256 chunk IDs
-│
-├── enricher.py              ← Step 4. cross-paper linking (runs once after all papers)
-│                               Pass 1: entity linking across papers
-│                               Pass 2: contradiction candidate detection
-│                               Pass 3: gap matrix computation
-│
-├── query_handler.py         ← Step 5. question → query plan
-│                               pure logic, no database access
-│                               detects intent, builds ChromaDB filter
-│
-├── retriever.py             ← Step 6. query plan → ranked results
-│                               Stage 1: ChromaDB ANN search
-│                               Stage 2: cross-encoder re-ranking
-│
-├── chroma_store/            ← ChromaDB data on disk (auto-created)
-│   ├── chroma.sqlite3       ← ChromaDB's internal metadata and index
-│   └── [uuid folders]       ← HNSW index files per collection
-│                               ADD THIS TO .gitignore
-│
-└── utils/
-    ├── __init__.py          ← empty, makes utils/ a Python sub-package
-    ├── paper_id.py          ← shared paper ID convention
-    │                           used by chunker, pipeline, and friend's KG
-    └── text_builder.py      ← builds embed_text strings per chunk type
-                                isolated so embed text can be tuned independently
-```
+└─ Collection: researcher_feedback (100 docs)
+   ├─ Agent feedback written at runtime
+   ├─ Not populated during indexing
+   └─ [indexed with HNSW for fast search]
 
 ---
 
